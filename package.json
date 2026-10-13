@@ -1,0 +1,24 @@
+{
+  "name": "reels-finder",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reels Finder — Express, PostgreSQL and Apify-ready backend",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "preview": "node scripts/preview.js",
+    "check": "node --check src/server.js && node --check src/app.js && node --check src/db.js && node --check src/apify.js && node --check public/app.js && node --check scripts/preview.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "pg-mem": "^3.0.5"
+  }
+}

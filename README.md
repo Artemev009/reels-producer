@@ -1,26 +1,54 @@
 # Reels Finder
 
-Минимальный веб-проект для будущего сервиса Reels Producer.
+Рабочий MVP сервиса для сбора Reels конкурентов, подготовки ремиксов и хранения сценариев.
+
+## Архитектура
+
+```text
+Browser UI → Express REST API → PostgreSQL
+                         ↘ Apify (после добавления токена)
+```
+
+- `public/` — интерфейс без сборщика;
+- `src/app.js` — REST API;
+- `src/apify.js` — подготовленная интеграция с Apify;
+- `db/migrations/` — SQL-схема и начальные демонстрационные данные;
+- `render.yaml` — Docker web service и связанный Render Postgres.
 
 ## Локальный запуск
 
-Без Docker:
+Требуются Node.js 22+ и PostgreSQL.
 
 ```powershell
-npx --yes serve . -l 3000
+npm install
+$env:DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/reels_finder"
+$env:DB_SSL = "false"
+npm start
 ```
 
-После запуска страница доступна по адресу `http://localhost:3000`.
+Сервер сам применяет новые SQL-миграции. Интерфейс открывается по адресу `http://localhost:3000`.
 
-С Docker:
+## API
 
-```powershell
-docker build -t reels-finder .
-docker run --rm -e PORT=8080 -p 8080:8080 reels-finder
-```
+- `GET/POST /api/competitors`
+- `POST /api/competitors/:id/sync`
+- `GET /api/reels`
+- `GET/PATCH/DELETE /api/reels/:id`
+- `GET/POST /api/scripts`
+- `PATCH/DELETE /api/scripts/:id`
+- `GET /health`
 
-Страница будет доступна по адресу `http://localhost:8080`.
+Все данные приложения хранятся в PostgreSQL. API использует параметризованные SQL-запросы.
 
-## Публикация
+## Apify
 
-Файл `render.yaml` описывает бесплатный Docker-сервис Render. Изменения ветки `main` автоматически запускают новую сборку и деплой.
+В окружении сервера нужно задать:
+
+- `APIFY_API_TOKEN` — секретный токен;
+- `APIFY_ACTOR_ID` — идентификатор Actor. По умолчанию используется официальный `apify/instagram-reel-scraper`.
+
+После этого кнопка синхронизации запускает Actor, получает до 20 записей из Dataset и делает UPSERT в таблицу `reels`.
+
+## Render
+
+`render.yaml` описывает бесплатный Docker-сервис и PostgreSQL. `DATABASE_URL` передаётся серверу через приватное подключение Render. Изменения `main` автоматически запускают новый деплой.
