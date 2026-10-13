@@ -106,6 +106,18 @@ test("REST API reads seeded reels and persists a script", async () => {
       body: JSON.stringify({ reel_id: reels[0].id })
     });
     assert.equal(scriptResponse.status, 201);
+    const createdScript = (await scriptResponse.json()).data;
+    const detailResponse = await fetch(`${base}/api/scripts/${createdScript.id}`);
+    assert.equal(detailResponse.status, 200);
+    assert.equal((await detailResponse.json()).data.title, "Test reel");
+
+    const updateResponse = await fetch(`${base}/api/scripts/${createdScript.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Edited script", status: "ready" })
+    });
+    assert.equal(updateResponse.status, 200);
+    assert.equal((await updateResponse.json()).data.status, "ready");
     const scripts = (await (await fetch(`${base}/api/scripts`)).json()).data;
     assert.equal(scripts.length, 2);
   } finally {

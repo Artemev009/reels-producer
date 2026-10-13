@@ -7,6 +7,7 @@ let sortMode = "latest";
 let editMode = false;
 let originalMode = false;
 let currentReel = null;
+let selectedScriptId = null;
 
 const icon = (name) => `<svg aria-hidden="true"><use href="#i-${name}"></use></svg>`;
 const escapeHtml = (value = "") => String(value).replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
@@ -15,14 +16,30 @@ const duration = (seconds = 0) => `${Math.floor(Number(seconds) / 60)}:${String(
 const compact = (value = 0) => new Intl.NumberFormat("ru", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value));
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
-  });
-  if (response.status === 204) return null;
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Ошибка API: ${response.status}`);
-  return payload.data;
+  const method = String(options.method || "GET").toUpperCase();
+  const attempts = method === "GET" ? 3 : 1;
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetch(path, {
+        ...options,
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) }
+      });
+      if (response.status === 204) return null;
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const error = new Error(payload.error || `Ошибка API: ${response.status}`);
+        error.retryable = response.status >= 500;
+        throw error;
+      }
+      return payload.data;
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts - 1 || error.retryable === false) break;
+      await new Promise((resolve) => setTimeout(resolve, 650 * (attempt + 1)));
+    }
+  }
+  throw new Error(lastError?.message === "Failed to fetch" ? "Сервер просыпается или соединение прервалось" : lastError?.message || "Не удалось связаться с сервером");
 }
 
 function showToast(message) {
@@ -33,7 +50,7 @@ function showToast(message) {
 }
 
 function loading() {
-  app.innerHTML = `<div class="loading">Загружаем данные</div>`;
+  app.innerHTML = `<div class="loading">Загружаем данные — бесплатный сервер может просыпаться до минуты</div>`;
 }
 
 function pageHead(title, subtitle, action = "") {
@@ -42,6 +59,9 @@ function pageHead(title, subtitle, action = "") {
 
 async function setView(view) {
   activeView = view;
+  if (view === "home") activeTab = "all";
+  if (view === "favorites") activeTab = "favorite";
+  if (view === "scripts") activeTab = "scripts";
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   loading();
   try {
@@ -49,8 +69,10 @@ async function setView(view) {
     if (view === "competitors") await renderCompetitors();
     if (view === "scripts") await renderScripts();
     if (view === "remix") await renderRemix();
+    if (view === "script-editor") await renderScriptEditor();
   } catch (error) {
-    app.innerHTML = `<section class="page"><div class="empty"><strong>Не удалось загрузить данные</strong><br><br>${escapeHtml(error.message)}</div></section>`;
+    app.innerHTML = `<section class="page"><div class="empty error-state"><strong>Не удалось загрузить данные</strong><p>${escapeHtml(error.message)}</p><button class="button primary" id="retry-view">Повторить</button></div></section>`;
+    document.querySelector("#retry-view")?.addEventListener("click", () => setView(view));
   }
   app.focus({ preventScroll: true });
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -58,9 +80,9 @@ async function setView(view) {
 
 function reelCard(reel) {
   const mediaLabel = reel.media_status === "stored" ? "Сохранено" : reel.video_url ? "Видео" : "Оригинал";
-  return `<article class="reel-card" data-card-id="${reel.id}">
+  return `<article class="reel-card" data-card-id="${reel.id}" data-source-url="${escapeHtml(reel.source_url)}">
     <div class="reel-cover interactive" data-remix="${reel.id}" role="button" tabindex="0" aria-label="Открыть ${escapeHtml(reel.title)}">
-      <img src="${escapeHtml(reel.thumbnail_url)}" alt="Превью: ${escapeHtml(reel.title)}" loading="lazy"><span class="media-pill ${escapeHtml(reel.media_status || "missing")}">${mediaLabel}</span><span class="duration">${duration(reel.duration_seconds)}</span>
+      <img src="${escapeHtml(reel.thumbnail_url)}" alt="Превью: ${escapeHtml(reel.title)}" loading="lazy" data-fallback><span class="media-pill ${escapeHtml(reel.media_status || "missing")}">${mediaLabel}</span><span class="duration">${duration(reel.duration_seconds)}</span>
     </div>
     <h2 class="reel-title">${escapeHtml(reel.title)}</h2><p class="handle">${escapeHtml(reel.instagram_handle || "")}</p>
     <p class="metrics"><span>▷ ${compact(reel.views_count)}</span><span>♡ ${compact(reel.likes_count)}</span></p>
@@ -70,15 +92,18 @@ function reelCard(reel) {
 
 async function renderHome(onlyFavorites = false) {
   const query = new URLSearchParams({ sort: sortMode });
-  if (onlyFavorites) query.set("favorite", "true");
-  const reels = await api(`/api/reels?${query}`);
+  const favoriteQuery = new URLSearchParams({ sort: sortMode, favorite: "true" });
+  const [allReels, favoriteReels, scripts] = await Promise.all([
+    api(`/api/reels?${query}`), api(`/api/reels?${favoriteQuery}`), api("/api/scripts")
+  ]);
+  const reels = onlyFavorites ? favoriteReels : allReels;
   app.innerHTML = `<section class="page">
     ${pageHead(onlyFavorites ? "Избранное" : "Главная", onlyFavorites ? "Сохранённые идеи для будущих сценариев" : "Все собранные рилс из аккаунтов конкурентов", `<button class="button primary" data-view="competitors">${icon("plus")}<span>Добавить конкурента</span></button>`)}
     <div class="toolbar">
       <div class="tabs" role="tablist">
-        <button class="tab ${activeTab === "all" ? "active" : ""}" data-tab="all">Все рилс <strong>${reels.length}</strong></button>
-        <button class="tab ${activeTab === "favorite" ? "active" : ""}" data-tab="favorite">Избранное</button>
-        <button class="tab ${activeTab === "scripts" ? "active" : ""}" data-tab="scripts">Мои сценарии</button>
+        <button class="tab ${activeTab === "all" ? "active" : ""}" data-tab="all">Все рилс <strong>${allReels.length}</strong></button>
+        <button class="tab ${activeTab === "favorite" ? "active" : ""}" data-tab="favorite">Избранное <strong>${favoriteReels.length}</strong></button>
+        <button class="tab ${activeTab === "scripts" ? "active" : ""}" data-tab="scripts">Мои сценарии <strong>${scripts.length}</strong></button>
       </div>
       <label class="search-wrap">${icon("search")}<input id="reel-search" type="search" placeholder="Поиск по заголовку, аккаунту..." aria-label="Поиск рилс"></label>
       <button class="icon-button" id="sort-reels" aria-label="Сортировка" title="${sortMode === "latest" ? "Сначала новые" : "Сначала популярные"}">${icon("sliders")}</button>
@@ -105,17 +130,13 @@ function openCardMenu(button, reelId) {
   const card = button.closest(".reel-card");
   const menu = document.createElement("div");
   menu.className = "action-menu";
-  menu.innerHTML = `<button data-favorite="${reelId}">☆ Добавить / убрать избранное</button><button data-open="${reelId}">${icon("external")} Открыть оригинал</button>`;
+  menu.innerHTML = `<button data-favorite="${reelId}">☆ Добавить / убрать избранное</button><a href="${escapeHtml(card.dataset.sourceUrl)}" target="_blank" rel="noopener noreferrer">${icon("external")} Открыть оригинал</a>`;
   card.querySelector(".card-actions").append(menu);
   menu.querySelector("[data-favorite]").addEventListener("click", async () => {
     const reel = await api(`/api/reels/${reelId}`);
     await api(`/api/reels/${reelId}`, { method: "PATCH", body: JSON.stringify({ is_favorite: !reel.is_favorite }) });
     showToast(reel.is_favorite ? "Удалено из избранного" : "Добавлено в избранное");
     renderHome(activeView === "favorites");
-  });
-  menu.querySelector("[data-open]").addEventListener("click", async () => {
-    const reel = await api(`/api/reels/${reelId}`);
-    window.open(reel.source_url, "_blank", "noopener,noreferrer");
   });
 }
 
@@ -139,13 +160,13 @@ async function renderCompetitors() {
     ${pageHead("Конкуренты", "Добавляйте Instagram аккаунты и собирайте их последние рилс")}
     <form class="fetch-panel" id="competitor-form"><div class="url-field"><input class="url-input" name="instagram" placeholder="https://www.instagram.com/username" value="" aria-label="Ссылка на Instagram" required></div><button class="button primary" type="submit">Добавить и загрузить 20 рилс →</button></form>
     <div class="competitor-list">${competitors.length ? competitors.map((competitor) => `<article class="profile-panel">
-      <img class="profile-photo" src="${escapeHtml(competitor.avatar_url || reels.find((reel) => String(reel.competitor_id) === String(competitor.id))?.thumbnail_url || "")}" alt=""><div class="profile-copy"><strong>${escapeHtml(competitor.instagram_handle)}</strong><span>${escapeHtml(competitor.display_name)}</span><small>${competitor.last_synced_at ? `Обновлено ${new Date(competitor.last_synced_at).toLocaleString("ru")}` : "Ещё не синхронизирован"}</small></div>
+      <img class="profile-photo" src="${escapeHtml(competitor.avatar_url || reels.find((reel) => String(reel.competitor_id) === String(competitor.id))?.thumbnail_url || "/placeholder.svg")}" alt="" data-fallback><div class="profile-copy"><strong>${escapeHtml(competitor.instagram_handle)}</strong><span>${escapeHtml(competitor.display_name)}</span><small>${competitor.last_synced_at ? `Обновлено ${new Date(competitor.last_synced_at).toLocaleString("ru")}` : "Ещё не синхронизирован"}</small></div>
       <div class="profile-stats"><div class="stat"><strong>${compact(competitor.reels_count)}</strong><span>рилс</span></div><div class="stat"><strong>${compact(competitor.total_views)}</strong><span>просмотров</span></div><div class="stat"><strong>${statusLabel(competitor.sync_status)}</strong><span>${competitor.sync_error ? escapeHtml(competitor.sync_error) : `${competitor.sync_imported_count || 0} импортировано`}</span></div></div>
       <div class="profile-actions"><a class="button" href="${escapeHtml(competitor.profile_url)}" target="_blank" rel="noopener">${icon("external")} Instagram</a><button class="button sync-competitor" data-sync-competitor="${competitor.id}" ${active.has(competitor.sync_status) ? "disabled" : ""}>${icon("refresh")} ${active.has(competitor.sync_status) ? "Синхронизация…" : "Обновить"}</button></div>
     </article>`).join("") : `<div class="empty">Добавьте первого конкурента.</div>`}</div>
     <div class="section-head"><h2>Последние рилс</h2><span class="success-pill">${reels.length} записей в PostgreSQL</span></div>
     <div class="table-panel"><table class="reels-table"><thead><tr><th>#</th><th>Превью</th><th>Заголовок</th><th>Длительность</th><th>Просмотры</th><th>Статус</th><th></th></tr></thead><tbody>
-      ${reels.map((reel, index) => `<tr><td>${index + 1}</td><td><img class="table-preview" src="${escapeHtml(reel.thumbnail_url)}" alt=""></td><td class="table-title">${escapeHtml(reel.title)}</td><td>${duration(reel.duration_seconds)}</td><td>${compact(reel.views_count)}</td><td><span class="status">${escapeHtml(reel.status)}</span></td><td><button class="more" data-remix="${reel.id}" aria-label="Открыть рилс">${icon("more")}</button></td></tr>`).join("")}
+      ${reels.map((reel, index) => `<tr><td>${index + 1}</td><td><img class="table-preview" src="${escapeHtml(reel.thumbnail_url)}" alt="" data-fallback></td><td class="table-title">${escapeHtml(reel.title)}</td><td>${duration(reel.duration_seconds)}</td><td>${compact(reel.views_count)}</td><td><span class="status">${escapeHtml(reel.status)}</span></td><td><button class="more" data-remix="${reel.id}" aria-label="Открыть рилс">${icon("more")}</button></td></tr>`).join("")}
     </tbody></table></div>
   </section>`;
   bindPageEvents();
@@ -196,7 +217,7 @@ async function renderRemix() {
     <div class="breadcrumb">Главная　›　Рилс　›　Remix</div>
     ${pageHead("Remix Reel", "Используйте структуру этого рилса и создайте свой уникальный сценарий")}
     <div class="remix-layout">
-      <div class="video-frame">${reel.video_url ? `<video controls playsinline poster="${escapeHtml(reel.thumbnail_url)}" src="${escapeHtml(reel.video_url)}">Ваш браузер не поддерживает видео.</video>` : `<img src="${escapeHtml(reel.thumbnail_url)}" alt="${escapeHtml(reel.title)}"><a class="play" href="${escapeHtml(reel.source_url)}" target="_blank" rel="noopener" aria-label="Открыть оригинал">${icon("play")}</a>`}</div>
+      <div class="video-frame">${reel.video_url ? `<video controls playsinline poster="${escapeHtml(reel.thumbnail_url)}" src="${escapeHtml(reel.video_url)}">Ваш браузер не поддерживает видео.</video><div class="video-error" hidden><strong>Ссылка на видео устарела</strong><a class="button" href="${escapeHtml(reel.source_url)}" target="_blank" rel="noopener">Открыть оригинал</a></div>` : `<img src="${escapeHtml(reel.thumbnail_url)}" alt="${escapeHtml(reel.title)}" data-fallback><a class="play" href="${escapeHtml(reel.source_url)}" target="_blank" rel="noopener" aria-label="Открыть оригинал">${icon("play")}</a>`}</div>
       <div>
         ${reel.media_status === "stored" ? "" : `<div class="notice">${reel.video_url ? "Видео загружено по временной ссылке источника. Подключение R2 сделает его постоянным." : "Видео ещё не импортировано. Можно открыть оригинал в Instagram или повторить синхронизацию."}</div>`}
         <div class="remix-top"><div><h2>${escapeHtml(reel.title)}</h2><p>${escapeHtml(reel.instagram_handle || "")}　•　${compact(reel.views_count)} просмотров　•　${compact(reel.likes_count)} лайков</p></div><button class="more" id="favorite-reel" title="Избранное">${reel.is_favorite ? "★" : icon("star")}</button></div>
@@ -217,7 +238,14 @@ async function renderRemix() {
     editMode = false; showToast("Сценарий сохранён в PostgreSQL"); await renderRemix();
   });
   document.querySelector("#copy-script")?.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(`${reel.hook_text}\n\n${reel.script_text}\n\n${reel.cta_text}`);
+    const value = `${reel.hook_text}\n\n${reel.script_text}\n\n${reel.cta_text}`;
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      const area = document.createElement("textarea");
+      area.value = value; area.style.position = "fixed"; area.style.opacity = "0";
+      document.body.append(area); area.select(); document.execCommand("copy"); area.remove();
+    }
     showToast("Сценарий скопирован");
   });
   document.querySelector("#use-template")?.addEventListener("click", async () => {
@@ -229,17 +257,57 @@ async function renderRemix() {
     await api(`/api/reels/${reel.id}`, { method: "PATCH", body: JSON.stringify({ is_favorite: !reel.is_favorite }) });
     showToast(reel.is_favorite ? "Удалено из избранного" : "Добавлено в избранное"); await renderRemix();
   });
+  document.querySelector(".video-frame video")?.addEventListener("error", (event) => {
+    event.currentTarget.hidden = true;
+    document.querySelector(".video-error").hidden = false;
+  });
 }
 
 async function renderScripts() {
   const scripts = await api("/api/scripts");
-  app.innerHTML = `<section class="page">${pageHead("Мои сценарии", "Сохранённые в PostgreSQL сценарии", `<button class="button primary" data-view="home">${icon("plus")}<span>Новый сценарий</span></button>`)}
-    <div class="scripts-grid">${scripts.length ? scripts.map((script) => `<article class="script-card" data-script="${script.id}" ${script.reel_id ? `data-remix="${script.reel_id}"` : ""}>${script.thumbnail_url ? `<img class="script-thumb" src="${escapeHtml(script.thumbnail_url)}" alt="">` : ""}<small>${escapeHtml(script.status)} · ${new Date(script.updated_at).toLocaleDateString("ru")}</small><h3>${escapeHtml(script.title)}</h3><footer><span>${duration(script.duration_seconds)}</span><button class="delete-script" data-delete-script="${script.id}">Удалить</button></footer></article>`).join("") : `<div class="empty">Сохранённых сценариев пока нет.</div>`}</div>
+  app.innerHTML = `<section class="page">${pageHead("Мои сценарии", "Сохранённые в PostgreSQL сценарии", `<button class="button primary" id="new-script">${icon("plus")}<span>Новый сценарий</span></button>`)}
+    <div class="scripts-grid">${scripts.length ? scripts.map((script) => `<article class="script-card" data-edit-script="${script.id}" role="button" tabindex="0">${script.thumbnail_url ? `<img class="script-thumb" src="${escapeHtml(script.thumbnail_url)}" alt="" data-fallback>` : `<div class="script-placeholder">${icon("file")}</div>`}<small>${escapeHtml(script.status)} · ${new Date(script.updated_at).toLocaleDateString("ru")}</small><h3>${escapeHtml(script.title)}</h3><p>${escapeHtml(script.hook_text || "Без хука")}</p><footer><span>${duration(script.duration_seconds)}</span><button class="delete-script" data-delete-script="${script.id}">Удалить</button></footer></article>`).join("") : `<div class="empty">Сохранённых сценариев пока нет.<br><br>Создайте пустой сценарий или выберите шаблон у любого Reel.</div>`}</div>
   </section>`;
   bindPageEvents();
+  document.querySelector("#new-script").addEventListener("click", async () => {
+    const script = await api("/api/scripts", { method: "POST", body: JSON.stringify({ title: "Новый сценарий" }) });
+    selectedScriptId = Number(script.id);
+    await setView("script-editor");
+  });
+  app.querySelectorAll("[data-edit-script]").forEach((card) => {
+    const open = () => { selectedScriptId = Number(card.dataset.editScript); setView("script-editor"); };
+    card.addEventListener("click", (event) => { if (!event.target.closest("[data-delete-script]")) open(); });
+    card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") open(); });
+  });
   app.querySelectorAll("[data-delete-script]").forEach((button) => button.addEventListener("click", async (event) => {
     event.stopPropagation(); await api(`/api/scripts/${button.dataset.deleteScript}`, { method: "DELETE" }); showToast("Сценарий удалён"); await renderScripts();
   }));
+}
+
+async function renderScriptEditor() {
+  if (!selectedScriptId) return setView("scripts");
+  const script = await api(`/api/scripts/${selectedScriptId}`);
+  app.innerHTML = `<section class="page script-editor-page">
+    <div class="breadcrumb">Мои сценарии　›　Редактор</div>
+    ${pageHead("Редактор сценария", "Изменения сохраняются в PostgreSQL")}
+    <form class="script-form" id="script-form">
+      <label>Название<input name="title" value="${escapeHtml(script.title)}" maxlength="300" required></label>
+      <label>Хук<textarea name="hook_text" rows="3" placeholder="Первые секунды, которые удержат внимание">${escapeHtml(script.hook_text)}</textarea></label>
+      <label>Основной сценарий<textarea name="script_text" rows="10" placeholder="Основная часть ролика">${escapeHtml(script.script_text)}</textarea></label>
+      <label>Call to Action<textarea name="cta_text" rows="3" placeholder="Что зритель должен сделать дальше">${escapeHtml(script.cta_text)}</textarea></label>
+      <label class="status-field">Статус<select name="status"><option value="draft" ${script.status === "draft" ? "selected" : ""}>Черновик</option><option value="ready" ${script.status === "ready" ? "selected" : ""}>Готов</option><option value="published" ${script.status === "published" ? "selected" : ""}>Опубликован</option></select></label>
+      <div class="form-actions"><button class="button" type="button" id="back-to-scripts">Назад</button>${script.reel_id ? `<button class="button" type="button" id="open-source">Открыть исходный Reel</button>` : ""}<button class="button primary" type="submit">Сохранить сценарий</button></div>
+    </form>
+  </section>`;
+  document.querySelector("#back-to-scripts").addEventListener("click", () => setView("scripts"));
+  document.querySelector("#open-source")?.addEventListener("click", () => { selectedReelId = Number(script.reel_id); setView("remix"); });
+  document.querySelector("#script-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    await api(`/api/scripts/${script.id}`, { method: "PATCH", body: JSON.stringify(values) });
+    showToast("Сценарий сохранён");
+    await setView("scripts");
+  });
 }
 
 function bindPageEvents() {
@@ -253,4 +321,10 @@ function bindPageEvents() {
 
 document.querySelectorAll(".sidebar [data-view]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
 document.addEventListener("click", (event) => { if (!event.target.closest("[data-menu], .action-menu")) document.querySelectorAll(".action-menu").forEach((menu) => menu.remove()); });
+document.addEventListener("error", (event) => {
+  if (!(event.target instanceof HTMLImageElement) || !event.target.matches("[data-fallback]")) return;
+  event.target.removeAttribute("data-fallback");
+  event.target.src = "/placeholder.svg";
+  event.target.classList.add("image-fallback");
+}, true);
 setView("home");

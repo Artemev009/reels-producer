@@ -215,6 +215,17 @@ export function createApp({ db, apifyImporter = startApifySync }) {
     response.json({ data: result.rows });
   });
 
+  app.get("/api/scripts/:id", async (request, response) => {
+    const result = await db.query(
+      `SELECT s.*, r.thumbnail_url, r.duration_seconds, r.source_url
+       FROM scripts s LEFT JOIN reels r ON r.id = s.reel_id
+       WHERE s.id = $1`,
+      [parseId(request.params.id)]
+    );
+    if (!result.rowCount) return response.status(404).json({ error: "Сценарий не найден" });
+    response.json({ data: result.rows[0] });
+  });
+
   app.post("/api/scripts", async (request, response) => {
     const reelId = request.body.reel_id ? parseId(request.body.reel_id, "reel_id") : null;
     let source = null;
