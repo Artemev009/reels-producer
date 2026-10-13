@@ -8,12 +8,26 @@ let editMode = false;
 let originalMode = false;
 let currentReel = null;
 let selectedScriptId = null;
+let selectedCompetitorId = null;
 
 const icon = (name) => `<svg aria-hidden="true"><use href="#i-${name}"></use></svg>`;
 const escapeHtml = (value = "") => String(value).replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
 const nl2br = (value = "") => escapeHtml(value).replace(/\n/g, "<br>");
 const duration = (seconds = 0) => `${Math.floor(Number(seconds) / 60)}:${String(Number(seconds) % 60).padStart(2, "0")}`;
 const compact = (value = 0) => new Intl.NumberFormat("ru", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value));
+const dateTime = (value) => value ? new Date(value).toLocaleString("ru", { dateStyle: "short", timeStyle: "short" }) : "—";
+
+function relativeTime(value) {
+  if (!value) return "ещё не обновлялся";
+  const seconds = Math.round((new Date(value).getTime() - Date.now()) / 1000);
+  const formatter = new Intl.RelativeTimeFormat("ru", { numeric: "auto" });
+  if (Math.abs(seconds) < 60) return formatter.format(seconds, "second");
+  const minutes = Math.round(seconds / 60);
+  if (Math.abs(minutes) < 60) return formatter.format(minutes, "minute");
+  const hours = Math.round(minutes / 60);
+  if (Math.abs(hours) < 24) return formatter.format(hours, "hour");
+  return formatter.format(Math.round(hours / 24), "day");
+}
 
 async function api(path, options = {}) {
   const method = String(options.method || "GET").toUpperCase();
@@ -154,19 +168,53 @@ function bindReelActions() {
 
 async function renderCompetitors() {
   const [competitors, reels] = await Promise.all([api("/api/competitors"), api("/api/reels?sort=latest")]);
-  const statusLabel = (status) => ({ queued: "В очереди", running: "Apify работает", importing: "Импортируем", succeeded: "Готово", partial: "Частично", failed: "Ошибка" })[status] || "Не запускалась";
   const active = new Set(["queued", "running", "importing"]);
+  const statusInfo = (competitor) => {
+    const map = {
+      queued: ["В очереди", "active", "Задача ожидает запуска"],
+      running: ["Собираем рилсы", "active", "Apify получает данные из Instagram"],
+      importing: ["Сохраняем", "active", "Записываем результат в PostgreSQL"],
+      succeeded: ["Готово", "success", `${competitor.sync_imported_count || 0} рилсов импортировано`],
+      partial: ["Частично", "warning", `${competitor.sync_imported_count || 0} импортировано, ${competitor.sync_skipped_count || 0} пропущено`],
+      failed: ["Ошибка", "error", competitor.sync_error || "Загрузка не завершилась"]
+    };
+    return map[competitor.sync_status] || ["Не запускалась", "muted", "Нажмите «Обновить», чтобы получить рилсы"];
+  };
+  const filteredReels = selectedCompetitorId
+    ? reels.filter((reel) => String(reel.competitor_id) === String(selectedCompetitorId))
+    : reels;
+  const selectedCompetitor = competitors.find((competitor) => String(competitor.id) === String(selectedCompetitorId));
+  const storedTotal = reels.filter((reel) => reel.media_status === "stored").length;
+  const temporaryTotal = reels.filter((reel) => reel.media_status === "external").length;
+  const hourlyRemaining = competitors[0]?.sync_hourly_remaining ?? 3;
+  const mediaStatus = (status) => ({ stored: ["Сохранено", "success"], external: ["Временная ссылка", "info"], storing: ["Сохраняется", "active"], failed: ["Ошибка видео", "error"], missing: ["Только оригинал", "warning"] })[status] || ["Неизвестно", "muted"];
   app.innerHTML = `<section class="page">
     ${pageHead("Конкуренты", "Добавляйте Instagram аккаунты и собирайте их последние рилс")}
+    <div class="overview-grid">
+      <article><span>Конкуренты</span><strong>${competitors.length}</strong><small>из 10 на тестовом стенде</small></article>
+      <article><span>Рилсы в базе</span><strong>${reels.length}</strong><small>${storedTotal} сохранено · ${temporaryTotal} временных</small></article>
+      <article><span>Бесплатные импорты</span><strong>${hourlyRemaining}</strong><small>осталось в текущем часу</small></article>
+    </div>
     <form class="fetch-panel" id="competitor-form"><div class="url-field"><input class="url-input" name="instagram" placeholder="https://www.instagram.com/username" value="" aria-label="Ссылка на Instagram" required></div><button class="button primary" type="submit">Добавить и загрузить 20 рилс →</button></form>
-    <div class="competitor-list">${competitors.length ? competitors.map((competitor) => `<article class="profile-panel">
-      <img class="profile-photo" src="${escapeHtml(competitor.avatar_url || reels.find((reel) => String(reel.competitor_id) === String(competitor.id))?.thumbnail_url || "/placeholder.svg")}" alt="" data-fallback><div class="profile-copy"><strong>${escapeHtml(competitor.instagram_handle)}</strong><span>${escapeHtml(competitor.display_name)}</span><small>${competitor.last_synced_at ? `Обновлено ${new Date(competitor.last_synced_at).toLocaleString("ru")}` : "Ещё не синхронизирован"}</small></div>
-      <div class="profile-stats"><div class="stat"><strong>${compact(competitor.reels_count)}</strong><span>рилс</span></div><div class="stat"><strong>${compact(competitor.total_views)}</strong><span>просмотров</span></div><div class="stat"><strong>${statusLabel(competitor.sync_status)}</strong><span>${competitor.sync_error ? escapeHtml(competitor.sync_error) : `${competitor.sync_imported_count || 0} импортировано`}</span></div></div>
-      <div class="profile-actions"><a class="button" href="${escapeHtml(competitor.profile_url)}" target="_blank" rel="noopener">${icon("external")} Instagram</a><button class="button sync-competitor" data-sync-competitor="${competitor.id}" ${active.has(competitor.sync_status) ? "disabled" : ""}>${icon("refresh")} ${active.has(competitor.sync_status) ? "Синхронизация…" : "Обновить"}</button></div>
-    </article>`).join("") : `<div class="empty">Добавьте первого конкурента.</div>`}</div>
-    <div class="section-head"><h2>Последние рилс</h2><span class="success-pill">${reels.length} записей в PostgreSQL</span></div>
+    <div class="competitor-list">${competitors.length ? competitors.map((competitor) => {
+      const [label, tone, detail] = statusInfo(competitor);
+      const savedPercent = competitor.reels_count ? Math.round(Number(competitor.stored_media_count) / Number(competitor.reels_count) * 100) : 0;
+      const running = active.has(competitor.sync_status);
+      const blocked = !running && !competitor.sync_can_start;
+      const limitReached = Number(competitor.sync_hourly_remaining) === 0 || Number(competitor.sync_daily_remaining) === 0;
+      const syncHint = limitReached ? "Исчерпан бесплатный лимит импортов" : blocked ? `Повтор будет доступен ${relativeTime(competitor.sync_next_available_at)}` : "Загрузить свежие рилсы";
+      const syncLabel = running ? "Синхронизация…" : limitReached ? "Лимит исчерпан" : blocked ? "Подождите" : "Обновить";
+      return `<article class="profile-panel competitor-panel ${String(selectedCompetitorId) === String(competitor.id) ? "selected" : ""}">
+        <div class="competitor-main"><img class="profile-photo" src="${escapeHtml(competitor.avatar_url || reels.find((reel) => String(reel.competitor_id) === String(competitor.id))?.thumbnail_url || "/placeholder.svg")}" alt="" data-fallback><div class="profile-copy"><strong>${escapeHtml(competitor.instagram_handle)}</strong><span>${escapeHtml(competitor.display_name)}</span><small>Обновлено ${relativeTime(competitor.last_synced_at)} · ${dateTime(competitor.last_synced_at)}</small></div><span class="sync-pill ${tone}">${running ? `<i></i>` : ""}${label}</span></div>
+        <p class="sync-detail ${tone}">${escapeHtml(detail)}</p>
+        <div class="profile-stats"><div class="stat"><strong>${compact(competitor.reels_count)}</strong><span>рилс</span></div><div class="stat"><strong>${compact(competitor.total_views)}</strong><span>просмотров</span></div><div class="stat"><strong>${competitor.stored_media_count || 0}</strong><span>видео сохранено</span></div><div class="stat"><strong>${competitor.external_media_count || 0}</strong><span>временных ссылок</span></div></div>
+        <div class="storage-line"><div><span>Надёжность видео</span><b>${savedPercent}%</b></div><div class="storage-progress"><i style="width:${savedPercent}%"></i></div></div>
+        <div class="profile-actions"><button class="button ${String(selectedCompetitorId) === String(competitor.id) ? "accent" : ""}" data-filter-competitor="${competitor.id}">Показать рилсы</button><a class="button" href="${escapeHtml(competitor.profile_url)}" target="_blank" rel="noopener">${icon("external")} Instagram</a><button class="button sync-competitor" data-sync-competitor="${competitor.id}" title="${escapeHtml(syncHint)}" ${running || blocked ? "disabled" : ""}>${icon("refresh")} ${syncLabel}</button><button class="button danger" data-delete-competitor="${competitor.id}" data-competitor-name="${escapeHtml(competitor.instagram_handle)}" data-reels-count="${competitor.reels_count || 0}" ${running ? "disabled" : ""}>Удалить</button></div>
+      </article>`;
+    }).join("") : `<div class="empty">Добавьте первого конкурента.</div>`}</div>
+    <div class="section-head"><h2>${selectedCompetitor ? `Рилсы ${escapeHtml(selectedCompetitor.instagram_handle)}` : "Последние рилс"}</h2><span class="success-pill">${filteredReels.length} записей в PostgreSQL</span>${selectedCompetitor ? `<button class="button clear-filter" data-clear-competitor>Показать все</button>` : ""}</div>
     <div class="table-panel"><table class="reels-table"><thead><tr><th>#</th><th>Превью</th><th>Заголовок</th><th>Длительность</th><th>Просмотры</th><th>Статус</th><th></th></tr></thead><tbody>
-      ${reels.map((reel, index) => `<tr><td>${index + 1}</td><td><img class="table-preview" src="${escapeHtml(reel.thumbnail_url)}" alt="" data-fallback></td><td class="table-title">${escapeHtml(reel.title)}</td><td>${duration(reel.duration_seconds)}</td><td>${compact(reel.views_count)}</td><td><span class="status">${escapeHtml(reel.status)}</span></td><td><button class="more" data-remix="${reel.id}" aria-label="Открыть рилс">${icon("more")}</button></td></tr>`).join("")}
+      ${filteredReels.length ? filteredReels.map((reel, index) => { const [label, tone] = mediaStatus(reel.media_status); return `<tr><td>${index + 1}</td><td><img class="table-preview" src="${escapeHtml(reel.thumbnail_url)}" alt="" data-fallback></td><td class="table-title">${escapeHtml(reel.title)}</td><td>${duration(reel.duration_seconds)}</td><td>${compact(reel.views_count)}</td><td><span class="status ${tone}">${label}</span></td><td><button class="more" data-remix="${reel.id}" aria-label="Открыть рилс">${icon("more")}</button></td></tr>`; }).join("") : `<tr><td colspan="7"><div class="empty compact-empty">У этого конкурента пока нет рилсов.</div></td></tr>`}
     </tbody></table></div>
   </section>`;
   bindPageEvents();
@@ -190,6 +238,25 @@ async function renderCompetitors() {
     try {
       const run = await api(`/api/competitors/${button.dataset.syncCompetitor}/sync`, { method: "POST", body: "{}" });
       showToast(`Синхронизация #${run.id} запущена`);
+      await renderCompetitors();
+    } catch (error) { showToast(error.message); button.disabled = false; }
+  }));
+  document.querySelectorAll("[data-filter-competitor]").forEach((button) => button.addEventListener("click", () => {
+    selectedCompetitorId = Number(button.dataset.filterCompetitor);
+    renderCompetitors();
+  }));
+  document.querySelector("[data-clear-competitor]")?.addEventListener("click", () => {
+    selectedCompetitorId = null;
+    renderCompetitors();
+  });
+  document.querySelectorAll("[data-delete-competitor]").forEach((button) => button.addEventListener("click", async () => {
+    const message = `Удалить ${button.dataset.competitorName} и связанные рилсы (${button.dataset.reelsCount})? Сценарии останутся, но потеряют связь с источником.`;
+    if (!window.confirm(message)) return;
+    button.disabled = true;
+    try {
+      await api(`/api/competitors/${button.dataset.deleteCompetitor}`, { method: "DELETE" });
+      if (String(selectedCompetitorId) === button.dataset.deleteCompetitor) selectedCompetitorId = null;
+      showToast("Конкурент и его рилсы удалены");
       await renderCompetitors();
     } catch (error) { showToast(error.message); button.disabled = false; }
   }));

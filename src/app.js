@@ -163,7 +163,11 @@ export function createApp({ db, apifyImporter = startApifySync, env = process.en
       db.query("SELECT * FROM competitors ORDER BY created_at DESC"),
       db.query(`
         SELECT competitor_id, COUNT(*)::INTEGER AS reels_count,
-          COALESCE(SUM(views_count), 0)::BIGINT AS total_views
+          COALESCE(SUM(views_count), 0)::BIGINT AS total_views,
+          COALESCE(SUM(CASE WHEN media_status = 'stored' THEN 1 ELSE 0 END), 0)::INTEGER AS stored_media_count,
+          COALESCE(SUM(CASE WHEN media_status = 'external' THEN 1 ELSE 0 END), 0)::INTEGER AS external_media_count,
+          COALESCE(SUM(CASE WHEN media_status IN ('missing', 'failed') THEN 1 ELSE 0 END), 0)::INTEGER AS missing_media_count,
+          MAX(published_at) AS latest_reel_at
         FROM reels
         GROUP BY competitor_id
       `),
@@ -176,20 +180,36 @@ export function createApp({ db, apifyImporter = startApifySync, env = process.en
     for (const sync of syncs.rows) {
       if (!latestByCompetitor.has(String(sync.competitor_id))) latestByCompetitor.set(String(sync.competitor_id), sync);
     }
+    const now = Date.now();
+    const cooldownMinutes = positiveInteger(env.SYNC_COOLDOWN_MINUTES, 10);
+    const hourlyLimit = positiveInteger(env.SYNC_HOURLY_LIMIT, 3);
+    const dailyLimit = positiveInteger(env.SYNC_DAILY_LIMIT, 10);
+    const hourlyUsed = syncs.rows.filter((sync) => now - new Date(sync.started_at).getTime() < 60 * 60 * 1000).length;
+    const dailyUsed = syncs.rows.filter((sync) => now - new Date(sync.started_at).getTime() < 24 * 60 * 60 * 1000).length;
     const data = competitors.rows.map((competitor) => {
       const sync = latestByCompetitor.get(String(competitor.id));
       const aggregate = aggregateByCompetitor.get(String(competitor.id));
+      const nextSyncAt = sync?.started_at ? new Date(new Date(sync.started_at).getTime() + cooldownMinutes * 60 * 1000) : null;
+      const syncActive = ["queued", "running", "importing"].includes(sync?.status);
       return {
         ...competitor,
         reels_count: aggregate?.reels_count || 0,
         total_views: aggregate?.total_views || 0,
+        stored_media_count: aggregate?.stored_media_count || 0,
+        external_media_count: aggregate?.external_media_count || 0,
+        missing_media_count: aggregate?.missing_media_count || 0,
+        latest_reel_at: aggregate?.latest_reel_at || null,
         sync_run_id: sync?.id || null,
         sync_status: sync?.status || null,
         sync_imported_count: sync?.imported_count || 0,
         sync_skipped_count: sync?.skipped_count || 0,
         sync_error: sync?.error_message || null,
         sync_started_at: sync?.started_at || null,
-        sync_finished_at: sync?.finished_at || null
+        sync_finished_at: sync?.finished_at || null,
+        sync_next_available_at: nextSyncAt,
+        sync_can_start: !syncActive && (!nextSyncAt || nextSyncAt.getTime() <= now) && hourlyUsed < hourlyLimit && dailyUsed < dailyLimit,
+        sync_hourly_remaining: Math.max(0, hourlyLimit - hourlyUsed),
+        sync_daily_remaining: Math.max(0, dailyLimit - dailyUsed)
       };
     });
     response.json({ data });
@@ -214,7 +234,13 @@ export function createApp({ db, apifyImporter = startApifySync, env = process.en
   });
 
   app.delete("/api/competitors/:id", async (request, response) => {
-    const result = await db.query("DELETE FROM competitors WHERE id = $1 RETURNING id", [parseId(request.params.id)]);
+    const id = parseId(request.params.id);
+    const active = await db.query(
+      "SELECT 1 FROM sync_runs WHERE competitor_id = $1 AND status IN ('queued','running','importing') LIMIT 1",
+      [id]
+    );
+    if (active.rowCount) return response.status(409).json({ error: "Дождитесь завершения синхронизации перед удалением" });
+    const result = await db.query("DELETE FROM competitors WHERE id = $1 RETURNING id", [id]);
     if (!result.rowCount) return response.status(404).json({ error: "Конкурент не найден" });
     response.status(204).end();
   });

@@ -143,6 +143,11 @@ test("REST API reads seeded reels and persists a script", async () => {
     assert.equal(competitorsResponse.status, 200);
     assert.equal(competitors[0].reels_count, 1);
     assert.equal(Number(competitors[0].total_views), 0);
+    assert.equal(competitors[0].stored_media_count, 0);
+    assert.equal(competitors[0].external_media_count, 0);
+    assert.equal(competitors[0].missing_media_count, 1);
+    assert.equal(competitors[0].sync_can_start, true);
+    assert.equal(competitors[0].sync_hourly_remaining, 3);
 
     const syncResponse = await fetch(`${base}/api/competitors/${competitors[0].id}/sync`, { method: "POST" });
     const syncRun = (await syncResponse.json()).data;
@@ -186,6 +191,16 @@ test("REST API reads seeded reels and persists a script", async () => {
       method: "POST"
     });
     assert.equal(limitedSyncResponse.status, 429);
+
+    const protectedCompetitor = await pool.query(
+      "INSERT INTO competitors(instagram_handle, profile_url) VALUES ('@active', 'https://instagram.com/active') RETURNING id"
+    );
+    await pool.query("INSERT INTO sync_runs(competitor_id, status) VALUES ($1, 'queued')", [protectedCompetitor.rows[0].id]);
+    const protectedDelete = await fetch(`${base}/api/competitors/${protectedCompetitor.rows[0].id}`, { method: "DELETE" });
+    assert.equal(protectedDelete.status, 409);
+    await pool.query("UPDATE sync_runs SET status = 'succeeded' WHERE competitor_id = $1", [protectedCompetitor.rows[0].id]);
+    const allowedDelete = await fetch(`${base}/api/competitors/${protectedCompetitor.rows[0].id}`, { method: "DELETE" });
+    assert.equal(allowedDelete.status, 204);
 
     const video = Buffer.from("0123456789");
     await pool.query(
