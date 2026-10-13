@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: reels-finder
+    runtime: docker
+    plan: free
+    autoDeployTrigger: commit
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
