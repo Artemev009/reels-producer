@@ -255,6 +255,90 @@ export async function warmDatabaseMediaCache(db, { storage = createMediaStorage(
   return { storedReels, skipped: false };
 }
 
+async function evictOldestDatabaseMedia(db, reelId) {
+  const oldest = await db.query(
+    `SELECT reel_id FROM media_assets
+     WHERE storage_provider = 'postgres' AND kind = 'video' AND reel_id <> $1
+     ORDER BY updated_at ASC LIMIT 1`,
+    [reelId]
+  );
+  if (!oldest.rowCount) return null;
+  const evictedId = oldest.rows[0].reel_id;
+  const assets = await db.query(
+    "SELECT kind, source_url FROM media_assets WHERE reel_id = $1 AND storage_provider = 'postgres'",
+    [evictedId]
+  );
+  const byKind = Object.fromEntries(assets.rows.map((asset) => [asset.kind, asset.source_url]));
+  await db.query(
+    `UPDATE reels SET video_url = COALESCE($1, video_url), thumbnail_url = COALESCE($2, thumbnail_url),
+       media_status = CASE WHEN COALESCE($1, video_url) IS NULL THEN 'missing' ELSE 'external' END, updated_at = NOW()
+     WHERE id = $3`,
+    [byKind.video || null, byKind.thumbnail || null, evictedId]
+  );
+  await db.query("DELETE FROM media_assets WHERE reel_id = $1 AND storage_provider = 'postgres'", [evictedId]);
+  return evictedId;
+}
+
+async function replaceOldestDatabaseMedia(db, reelId, reel, env) {
+  let videoAsset;
+  try {
+    videoAsset = await storeInDatabase({ reelId, kind: "video", sourceUrl: reel.video_url, env });
+  } catch {
+    throw Object.assign(new Error("Не удалось сохранить видео: временная ссылка могла устареть"), { statusCode: 502 });
+  }
+  let thumbnailAsset = null;
+  if (reel.thumbnail_url) {
+    try {
+      thumbnailAsset = await storeInDatabase({ reelId, kind: "thumbnail", sourceUrl: reel.thumbnail_url, env });
+    } catch {
+      // A working video is more important than an optional local thumbnail copy.
+    }
+  }
+  const client = typeof db.connect === "function" ? await db.connect() : db;
+  try {
+    await client.query("BEGIN");
+    const evictedReelId = await evictOldestDatabaseMedia(client, reelId);
+    await saveAsset(client, reelId, "video", videoAsset);
+    if (thumbnailAsset) await saveAsset(client, reelId, "thumbnail", thumbnailAsset);
+    await client.query(
+      `UPDATE reels SET video_url = $1, thumbnail_url = COALESCE($2, thumbnail_url),
+       media_status = 'stored', updated_at = NOW() WHERE id = $3`,
+      [videoAsset.publicUrl, thumbnailAsset?.publicUrl || null, reelId]
+    );
+    await client.query("COMMIT");
+    return { evictedReelId, assetsStored: thumbnailAsset ? 2 : 1 };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    if (client !== db) client.release();
+  }
+}
+
+export async function cacheReelMedia(db, reelId, { storage = createMediaStorage(), env = process.env } = {}) {
+  const result = await db.query(
+    "SELECT id, video_url, thumbnail_url, media_status FROM reels WHERE id = $1",
+    [reelId]
+  );
+  if (!result.rowCount) throw Object.assign(new Error("Рилс не найден"), { statusCode: 404 });
+  const reel = result.rows[0];
+  if (reel.media_status === "stored") return { reelId, stored: true, evictedReelId: null };
+  if (!reel.video_url) throw Object.assign(new Error("У рилса нет доступной ссылки на видео"), { statusCode: 409 });
+  const databaseCache = !storage.configured && databaseCacheEnabled(env);
+  if (databaseCache && !await hasDatabaseCacheSlot(db, reelId, env)) {
+    const replaced = await replaceOldestDatabaseMedia(db, reelId, reel, env);
+    return { reelId, stored: true, ...replaced };
+  }
+  const media = await persistMedia(db, storage, reelId, {
+    videoUrl: reel.video_url,
+    thumbnailUrl: reel.thumbnail_url
+  }, env);
+  if (!media.videoStored) {
+    throw Object.assign(new Error("Не удалось сохранить видео: временная ссылка могла устареть"), { statusCode: 502 });
+  }
+  return { reelId, stored: true, evictedReelId: null, assetsStored: media.stored };
+}
+
 export async function backfillMissingSegments(db) {
   const result = await db.query(
     "SELECT id, description, hook_text, script_text, cta_text FROM reels"

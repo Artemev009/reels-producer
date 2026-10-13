@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { newDb } from "pg-mem";
-import { backfillMissingSegments, normalizeApifyReel } from "../src/apify.js";
+import { backfillMissingSegments, cacheReelMedia, normalizeApifyReel } from "../src/apify.js";
 import { createApp } from "../src/app.js";
 
 function addCurrentReelColumns(memory) {
@@ -122,6 +122,7 @@ test("REST API reads seeded reels and persists a script", async () => {
   const server = createApp({
     db: pool,
     env: { SCRIPT_LIMIT: "2", SYNC_COOLDOWN_MINUTES: "10", SYNC_HOURLY_LIMIT: "3", SYNC_DAILY_LIMIT: "10" },
+    mediaCacher: async (_db, reelId) => ({ reelId, stored: true, evictedReelId: null, assetsStored: 2 }),
     apifyImporter: async (_db, selectedCompetitor) => ({
       id: 77,
       competitor_id: selectedCompetitor.id,
@@ -137,6 +138,15 @@ test("REST API reads seeded reels and persists a script", async () => {
     const reels = (await reelsResponse.json()).data;
     assert.equal(reelsResponse.status, 200);
     assert.equal(reels.length, 1);
+
+    const csvResponse = await fetch(`${base}/api/export/reels.csv`);
+    assert.equal(csvResponse.status, 200);
+    assert.match(csvResponse.headers.get("content-type"), /text\/csv/);
+    assert.match(await csvResponse.text(), /Test reel/);
+
+    const cacheResponse = await fetch(`${base}/api/reels/${reels[0].id}/cache-media`, { method: "POST" });
+    assert.equal(cacheResponse.status, 200);
+    assert.equal((await cacheResponse.json()).data.assetsStored, 2);
 
     const competitorsResponse = await fetch(`${base}/api/competitors`);
     const competitors = (await competitorsResponse.json()).data;
@@ -216,6 +226,118 @@ test("REST API reads seeded reels and persists a script", async () => {
     assert.equal(Buffer.from(await mediaResponse.arrayBuffer()).toString(), "2345");
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    await pool.end();
+  }
+});
+
+test("owner password protects mutations while reads stay public", async () => {
+  const memory = newDb({ noAstCoverageCheck: true });
+  const schema = await readFile(new URL("../db/migrations/001_schema.sql", import.meta.url), "utf8");
+  memory.public.none(schema);
+  addCurrentReelColumns(memory);
+  const adapter = memory.adapters.createPg();
+  const pool = new adapter.Pool();
+  const server = createApp({
+    db: pool,
+    env: {
+      ADMIN_PASSWORD: "local-test-password",
+      ADMIN_SESSION_SECRET: "local-test-session-secret",
+      AUTH_COOKIE_SECURE: "false"
+    }
+  }).listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    const publicRead = await fetch(`${base}/api/reels`);
+    assert.equal(publicRead.status, 200);
+
+    const statusBefore = await fetch(`${base}/api/auth/status`);
+    assert.deepEqual((await statusBefore.json()).data, { enabled: true, authenticated: false });
+
+    const unauthorized = await fetch(`${base}/api/competitors`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instagram: "test" })
+    });
+    assert.equal(unauthorized.status, 401);
+
+    const wrongLogin = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "wrong" })
+    });
+    assert.equal(wrongLogin.status, 401);
+
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "local-test-password" })
+    });
+    assert.equal(login.status, 204);
+    const cookie = login.headers.get("set-cookie").split(";")[0];
+    assert.match(cookie, /^reels_admin=/);
+
+    const statusAfter = await fetch(`${base}/api/auth/status`, { headers: { Cookie: cookie } });
+    assert.deepEqual((await statusAfter.json()).data, { enabled: true, authenticated: true });
+
+    const authorized = await fetch(`${base}/api/competitors`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ instagram: "test" })
+    });
+    assert.equal(authorized.status, 201);
+
+    const malformedCookie = await fetch(`${base}/api/auth/status`, { headers: { Cookie: "reels_admin=%E0%A4%A" } });
+    assert.equal(malformedCookie.status, 200);
+    assert.equal((await malformedCookie.json()).data.authenticated, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await pool.end();
+  }
+});
+
+test("rotating database cache keeps the old video when a new source has expired", async () => {
+  const memory = newDb({ noAstCoverageCheck: true });
+  const schema = await readFile(new URL("../db/migrations/001_schema.sql", import.meta.url), "utf8");
+  memory.public.none(schema);
+  addCurrentReelColumns(memory);
+  const adapter = memory.adapters.createPg();
+  const pool = new adapter.Pool();
+  const competitor = await pool.query(
+    "INSERT INTO competitors(instagram_handle, profile_url) VALUES ('@cache', 'https://instagram.com/cache') RETURNING id"
+  );
+  const oldReel = await pool.query(
+    `INSERT INTO reels(competitor_id, platform_reel_id, source_url, video_url, thumbnail_url, title, media_status)
+     VALUES ($1, 'old', 'https://instagram.com/reel/old', '/api/media/1/video', '/api/media/1/thumbnail', 'Old', 'stored') RETURNING id`,
+    [competitor.rows[0].id]
+  );
+  const targetReel = await pool.query(
+    `INSERT INTO reels(competitor_id, platform_reel_id, source_url, video_url, thumbnail_url, title, media_status)
+     VALUES ($1, 'target', 'https://instagram.com/reel/target', 'https://cdn.example/expired.mp4', 'https://cdn.example/expired.jpg', 'Target', 'external') RETURNING id`,
+    [competitor.rows[0].id]
+  );
+  await pool.query(
+    `INSERT INTO media_assets(reel_id, kind, storage_provider, public_url, source_url, content_type, size_bytes, content)
+     VALUES ($1, 'video', 'postgres', $2, 'https://cdn.example/old.mp4', 'video/mp4', 3, $3)`,
+    [oldReel.rows[0].id, `/api/media/${oldReel.rows[0].id}/video`, Buffer.from("old")]
+  );
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("expired", { status: 403 });
+  try {
+    await assert.rejects(
+      cacheReelMedia(pool, targetReel.rows[0].id, {
+        storage: { configured: false },
+        env: { DATABASE_MEDIA_CACHE: "true", DATABASE_MEDIA_REELS_LIMIT: "1" }
+      }),
+      (error) => error.statusCode === 502
+    );
+    const cached = await pool.query("SELECT reel_id FROM media_assets WHERE storage_provider = 'postgres'");
+    assert.deepEqual(cached.rows.map((row) => Number(row.reel_id)), [Number(oldReel.rows[0].id)]);
+    const oldStatus = await pool.query("SELECT media_status FROM reels WHERE id = $1", [oldReel.rows[0].id]);
+    assert.equal(oldStatus.rows[0].media_status, "stored");
+  } finally {
+    globalThis.fetch = previousFetch;
     await pool.end();
   }
 });

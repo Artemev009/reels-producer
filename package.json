@@ -11,7 +11,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "preview": "node scripts/preview.js",
-    "check": "node --check src/server.js && node --check src/app.js && node --check src/db.js && node --check src/apify.js && node --check src/storage.js && node --check public/app.js && node --check scripts/preview.js",
+    "check": "node --check src/server.js && node --check src/app.js && node --check src/auth.js && node --check src/db.js && node --check src/apify.js && node --check src/storage.js && node --check public/app.js && node --check scripts/preview.js",
     "test": "node --test"
   },
   "dependencies": {

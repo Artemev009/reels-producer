@@ -9,6 +9,7 @@ let originalMode = false;
 let currentReel = null;
 let selectedScriptId = null;
 let selectedCompetitorId = null;
+let authState = { enabled: false, authenticated: true };
 
 const icon = (name) => `<svg aria-hidden="true"><use href="#i-${name}"></use></svg>`;
 const escapeHtml = (value = "") => String(value).replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
@@ -43,7 +44,9 @@ async function api(path, options = {}) {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         const error = new Error(payload.error || `Ошибка API: ${response.status}`);
+        error.status = response.status;
         error.retryable = response.status >= 500;
+        if (response.status === 401 && path !== "/api/auth/status") showLogin();
         throw error;
       }
       return payload.data;
@@ -54,6 +57,51 @@ async function api(path, options = {}) {
     }
   }
   throw new Error(lastError?.message === "Failed to fetch" ? "Сервер просыпается или соединение прервалось" : lastError?.message || "Не удалось связаться с сервером");
+}
+
+function updateAccountButton() {
+  const name = document.querySelector("#account-name");
+  const status = document.querySelector("#account-status");
+  const avatar = document.querySelector("#account-avatar");
+  if (!authState.enabled) {
+    name.textContent = "Локальный режим";
+    status.textContent = "Защита включится на Render";
+    avatar.textContent = "RF";
+  } else if (authState.authenticated) {
+    name.textContent = "Владелец";
+    status.textContent = "Нажмите, чтобы выйти";
+    avatar.textContent = "ВЛ";
+  } else {
+    name.textContent = "Гость";
+    status.textContent = "Войти для изменений";
+    avatar.textContent = "Г";
+  }
+}
+
+function showLogin() {
+  if (!authState.enabled) return;
+  const overlay = document.querySelector("#login-overlay");
+  overlay.hidden = false;
+  overlay.querySelector("input")?.focus();
+}
+
+function hideLogin() {
+  const overlay = document.querySelector("#login-overlay");
+  overlay.hidden = true;
+  const error = overlay.querySelector(".login-error");
+  error.hidden = true;
+  error.textContent = "";
+  overlay.querySelector("form")?.reset();
+}
+
+async function refreshSidebarStats() {
+  try {
+    const reels = await api("/api/reels?limit=200");
+    document.querySelector("#usage-count").textContent = `${reels.length} рилсов в PostgreSQL`;
+    document.querySelector("#usage-progress").style.width = `${Math.min(100, reels.length / 2)}%`;
+  } catch {
+    document.querySelector("#usage-count").textContent = "Статистика недоступна";
+  }
 }
 
 function showToast(message) {
@@ -188,8 +236,9 @@ async function renderCompetitors() {
   const temporaryTotal = reels.filter((reel) => reel.media_status === "external").length;
   const hourlyRemaining = competitors[0]?.sync_hourly_remaining ?? 3;
   const mediaStatus = (status) => ({ stored: ["Сохранено", "success"], external: ["Временная ссылка", "info"], storing: ["Сохраняется", "active"], failed: ["Ошибка видео", "error"], missing: ["Только оригинал", "warning"] })[status] || ["Неизвестно", "muted"];
+  const exportUrl = `/api/export/reels.csv${selectedCompetitor ? `?competitor_id=${selectedCompetitor.id}` : ""}`;
   app.innerHTML = `<section class="page">
-    ${pageHead("Конкуренты", "Добавляйте Instagram аккаунты и собирайте их последние рилс")}
+    ${pageHead("Конкуренты", "Добавляйте Instagram аккаунты и собирайте их последние рилс", `<a class="button" href="${exportUrl}" download>↓ Экспорт CSV</a>`)}
     <div class="overview-grid">
       <article><span>Конкуренты</span><strong>${competitors.length}</strong><small>из 10 на тестовом стенде</small></article>
       <article><span>Рилсы в базе</span><strong>${reels.length}</strong><small>${storedTotal} сохранено · ${temporaryTotal} временных</small></article>
@@ -280,13 +329,16 @@ async function renderRemix() {
   if (!selectedReelId) return setView("home");
   currentReel = await api(`/api/reels/${selectedReelId}`);
   const reel = currentReel;
+  const mediaNotice = reel.media_status === "stored" ? "" : reel.video_url
+    ? `<div class="notice notice-action"><span>Видео открывается по временной ссылке. Бесплатно можно закрепить до 5 выбранных роликов.</span><button class="button" id="cache-media">Закрепить видео</button></div>`
+    : `<div class="notice">Видео ещё не импортировано. Можно открыть оригинал в Instagram или повторить синхронизацию.</div>`;
   app.innerHTML = `<section class="page">
     <div class="breadcrumb">Главная　›　Рилс　›　Remix</div>
     ${pageHead("Remix Reel", "Используйте структуру этого рилса и создайте свой уникальный сценарий")}
     <div class="remix-layout">
       <div class="video-frame">${reel.video_url ? `<video controls playsinline poster="${escapeHtml(reel.thumbnail_url)}" src="${escapeHtml(reel.video_url)}">Ваш браузер не поддерживает видео.</video><div class="video-error" hidden><strong>Ссылка на видео устарела</strong><a class="button" href="${escapeHtml(reel.source_url)}" target="_blank" rel="noopener">Открыть оригинал</a></div>` : `<img src="${escapeHtml(reel.thumbnail_url)}" alt="${escapeHtml(reel.title)}" data-fallback><a class="play" href="${escapeHtml(reel.source_url)}" target="_blank" rel="noopener" aria-label="Открыть оригинал">${icon("play")}</a>`}</div>
       <div>
-        ${reel.media_status === "stored" ? "" : `<div class="notice">${reel.video_url ? "Видео загружено по временной ссылке источника. Подключение R2 сделает его постоянным." : "Видео ещё не импортировано. Можно открыть оригинал в Instagram или повторить синхронизацию."}</div>`}
+        ${mediaNotice}
         <div class="remix-top"><div><h2>${escapeHtml(reel.title)}</h2><p>${escapeHtml(reel.instagram_handle || "")}　•　${compact(reel.views_count)} просмотров　•　${compact(reel.likes_count)} лайков</p></div><button class="more" id="favorite-reel" title="Избранное">${reel.is_favorite ? "★" : icon("star")}</button></div>
         <div class="remix-toggle"><button class="button ${originalMode ? "accent" : ""}" id="show-original">Оригинал</button><button class="button ${!originalMode ? "accent" : ""}" id="show-remix">✦ Мой ремикс</button>${!originalMode ? `<button class="button primary" id="toggle-edit">${editMode ? "Отменить" : "Редактировать"}</button>` : ""}</div>
         <div class="segments">${segmentsMarkup(reel)}</div>
@@ -323,6 +375,20 @@ async function renderRemix() {
   document.querySelector("#favorite-reel").addEventListener("click", async () => {
     await api(`/api/reels/${reel.id}`, { method: "PATCH", body: JSON.stringify({ is_favorite: !reel.is_favorite }) });
     showToast(reel.is_favorite ? "Удалено из избранного" : "Добавлено в избранное"); await renderRemix();
+  });
+  document.querySelector("#cache-media")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "Сохраняем…";
+    try {
+      const result = await api(`/api/reels/${reel.id}/cache-media`, { method: "POST", body: "{}" });
+      showToast(result.evictedReelId ? "Видео закреплено вместо самого старого в кеше" : "Видео закреплено в бесплатном кеше");
+      await renderRemix();
+    } catch (error) {
+      showToast(error.message);
+      button.disabled = false;
+      button.textContent = "Закрепить видео";
+    }
   });
   document.querySelector(".video-frame video")?.addEventListener("error", (event) => {
     event.currentTarget.hidden = true;
@@ -394,4 +460,57 @@ document.addEventListener("error", (event) => {
   event.target.src = "/placeholder.svg";
   event.target.classList.add("image-fallback");
 }, true);
-setView("home");
+
+document.querySelector("#login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submit = form.querySelector("button[type='submit']");
+  const errorBox = form.querySelector(".login-error");
+  submit.disabled = true;
+  submit.textContent = "Проверяем…";
+  try {
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: new FormData(form).get("password") })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || "Не удалось войти");
+    authState = { ...authState, authenticated: true };
+    updateAccountButton();
+    hideLogin();
+    showToast("Режим владельца включён");
+  } catch (error) {
+    errorBox.textContent = error.message;
+    errorBox.hidden = false;
+  } finally {
+    submit.disabled = false;
+    submit.textContent = "Войти";
+  }
+});
+
+document.querySelector(".login-close").addEventListener("click", hideLogin);
+document.querySelector("#login-overlay").addEventListener("click", (event) => {
+  if (event.target === event.currentTarget) hideLogin();
+});
+document.querySelector("#account-button").addEventListener("click", async () => {
+  if (!authState.enabled) return showToast("Локально защита отключена");
+  if (!authState.authenticated) return showLogin();
+  await api("/api/auth/logout", { method: "POST", body: "{}" });
+  authState = { ...authState, authenticated: false };
+  updateAccountButton();
+  showToast("Вы вышли из режима владельца");
+});
+
+async function initialize() {
+  try {
+    authState = await api("/api/auth/status");
+  } catch {
+    authState = { enabled: false, authenticated: true };
+  }
+  updateAccountButton();
+  await Promise.all([setView("home"), refreshSidebarStats()]);
+}
+
+initialize();

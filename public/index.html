@@ -44,17 +44,28 @@
 
         <div class="sidebar-bottom">
           <div class="usage-card">
-            <span>Использовано</span>
-            <strong>42 из 200 рилс в этом месяце</strong>
-            <div class="progress"><i></i></div>
+            <span>Данные проекта</span>
+            <strong id="usage-count">Загружаем статистику…</strong>
+            <div class="progress"><i id="usage-progress"></i></div>
           </div>
-          <button class="profile"><span class="avatar">ИИ</span><span><strong>Игорь</strong><small>Pro план</small></span><b>›</b></button>
+          <button class="profile" id="account-button"><span class="avatar" id="account-avatar">RF</span><span><strong id="account-name">Гость</strong><small id="account-status">Войти для изменений</small></span><b>›</b></button>
         </div>
       </aside>
 
       <main id="app" class="content" tabindex="-1"></main>
     </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <div id="login-overlay" class="login-overlay" hidden>
+      <form class="login-card" id="login-form">
+        <button class="login-close" type="button" aria-label="Закрыть">×</button>
+        <span class="brand-mark"><svg><use href="#i-play" /></svg></span>
+        <h2>Режим владельца</h2>
+        <p>Просмотр доступен всем. Введите пароль, чтобы импортировать, редактировать или удалять данные.</p>
+        <label>Пароль<input name="password" type="password" autocomplete="current-password" required autofocus></label>
+        <div class="login-error" role="alert" hidden></div>
+        <button class="button primary" type="submit">Войти</button>
+      </form>
+    </div>
     <script type="module" src="app.js"></script>
   </body>
 </html>

@@ -45,4 +45,5 @@ for (const [id, title, thumbnail, seconds, views, likes, favorite] of demoReels)
   );
 }
 
-createApp({ db }).listen(3000, "127.0.0.1", () => console.log("Preview: http://127.0.0.1:3000"));
+const port = Number(process.env.PORT || 3000);
+createApp({ db }).listen(port, "127.0.0.1", () => console.log(`Preview: http://127.0.0.1:${port}`));

@@ -1,7 +1,8 @@
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { startApifySync } from "./apify.js";
+import { cacheReelMedia, startApifySync } from "./apify.js";
+import { createAdminAuth } from "./auth.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const publicDirectory = path.join(root, "public");
@@ -111,10 +112,20 @@ function byteRange(header, size) {
   return { start, end: Math.min(end, size - 1) };
 }
 
-export function createApp({ db, apifyImporter = startApifySync, env = process.env }) {
+export function createApp({ db, apifyImporter = startApifySync, mediaCacher = cacheReelMedia, env = process.env }) {
   const app = express();
   app.disable("x-powered-by");
+  app.set("trust proxy", 1);
   app.use(express.json({ limit: "256kb" }));
+  const auth = createAdminAuth(env);
+
+  app.get("/api/auth/status", auth.status);
+  app.post("/api/auth/login", auth.login);
+  app.post("/api/auth/logout", auth.logout);
+  app.use("/api", (request, response, next) => {
+    if (!["POST", "PATCH", "DELETE"].includes(request.method)) return next();
+    return auth.requireMutation(request, response, next);
+  });
 
   app.get("/health", async (_request, response) => {
     try {
@@ -283,6 +294,42 @@ export function createApp({ db, apifyImporter = startApifySync, env = process.en
       values
     );
     response.json({ data: result.rows });
+  });
+
+  app.get("/api/export/reels.csv", async (request, response) => {
+    const values = [];
+    let where = "";
+    if (request.query.competitor_id) {
+      values.push(parseId(request.query.competitor_id, "competitor_id"));
+      where = "WHERE r.competitor_id = $1";
+    }
+    const result = await db.query(
+      `SELECT r.id, c.instagram_handle, r.title, r.source_url, r.duration_seconds,
+         r.views_count, r.likes_count, r.comments_count, r.shares_count, r.media_status,
+         r.hook_text, r.script_text, r.cta_text, r.published_at
+       FROM reels r LEFT JOIN competitors c ON c.id = r.competitor_id
+       ${where} ORDER BY r.published_at DESC NULLS LAST, r.id DESC`,
+      values
+    );
+    const quote = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+    const header = ["id", "account", "title", "source_url", "duration_seconds", "views", "likes", "comments", "shares", "media_status", "hook", "script", "cta", "published_at"];
+    const csv = [header, ...result.rows.map((row) => [row.id, row.instagram_handle, row.title, row.source_url,
+      row.duration_seconds, row.views_count, row.likes_count, row.comments_count, row.shares_count,
+      row.media_status, row.hook_text, row.script_text, row.cta_text, row.published_at])]
+      .map((row) => row.map(quote).join(",")).join("\r\n");
+    response.set({
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="reels-finder-export.csv"',
+      "Cache-Control": "no-store"
+    });
+    response.send(`\uFEFF${csv}`);
+  });
+
+  app.post("/api/reels/:id/cache-media", async (request, response) => {
+    const id = parseId(request.params.id);
+    const result = await mediaCacher(db, id, { env });
+    const reel = await db.query("SELECT * FROM reels WHERE id = $1", [id]);
+    response.json({ data: { ...result, reel: reel.rows[0] } });
   });
 
   app.get("/api/reels/:id", async (request, response) => {

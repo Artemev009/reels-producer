@@ -39,6 +39,10 @@ services:
         value: "10"
       - key: SCRIPT_LIMIT
         value: "200"
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_SESSION_SECRET
+        sync: false
       - key: R2_ACCOUNT_ID
         sync: false
       - key: R2_ACCESS_KEY_ID
