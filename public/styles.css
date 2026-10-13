@@ -73,6 +73,8 @@ h1 { margin: 0; font-size: 30px; line-height: 1.15; letter-spacing: -1px; }
 .reel-cover img { width: 100%; height: 100%; display: block; object-fit: cover; transition: transform .35s ease; }
 .reel-card:hover .reel-cover img { transform: scale(1.025); }
 .duration { position: absolute; right: 7px; bottom: 7px; padding: 3px 6px; color: #fff; background: #151515d9; border-radius: 5px; font-size: 10px; }
+.media-pill { position: absolute; left: 7px; top: 7px; padding: 4px 7px; color: #fff; background: #475569d9; border-radius: 99px; font-size: 9px; font-weight: 700; z-index: 2; }
+.media-pill.stored { background: #169b62e6; }.media-pill.external { background: #2563ebe6; }.media-pill.missing, .media-pill.failed { background: #a16207e6; }
 .reel-title { min-height: 38px; margin: 11px 2px 5px; font-size: 12px; font-weight: 700; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .handle, .metrics { color: #8b919c; font-size: 10px; margin: 0 2px 5px; }
 .metrics { display: flex; gap: 9px; }
@@ -88,11 +90,14 @@ h1 { margin: 0; font-size: 30px; line-height: 1.15; letter-spacing: -1px; }
 .url-field { flex: 1; min-width: 0; position: relative; }
 .url-field::before { content: "◎"; position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: #ec4899; font-size: 19px; font-weight: 800; }
 .profile-panel { padding: 24px; display: flex; align-items: center; gap: 20px; margin-bottom: 30px; }
+.competitor-list { display: grid; gap: 12px; margin-bottom: 30px; }
+.competitor-list .profile-panel { margin-bottom: 0; }
 .profile-photo { width: 58px; height: 58px; border-radius: 50%; object-fit: cover; }
-.profile-copy { min-width: 170px; }.profile-copy strong { display: block; font-size: 14px; }.profile-copy span { color: var(--muted); font-size: 11px; }
+.profile-copy { min-width: 170px; }.profile-copy strong { display: block; font-size: 14px; }.profile-copy span, .profile-copy small { display: block; color: var(--muted); font-size: 11px; }.profile-copy small { margin-top: 5px; font-size: 9px; }
 .profile-stats { display: flex; gap: 45px; margin-left: 20px; }
 .stat strong, .stat span { display: block; }.stat strong { font-size: 17px; }.stat span { color: var(--muted); font-size: 10px; margin-top: 3px; }
 .profile-panel .button { margin-left: auto; }
+.profile-actions { margin-left: auto; display: flex; gap: 8px; }.profile-actions .button { margin-left: 0; white-space: nowrap; }.button:disabled { cursor: wait; opacity: .58; transform: none; }
 .section-head { display: flex; align-items: center; margin-bottom: 14px; gap: 12px; }
 .section-head h2 { margin: 0; font-size: 18px; letter-spacing: -.4px; }
 .success-pill { color: var(--green); background: #eaf9f1; padding: 5px 9px; border-radius: 99px; font-size: 10px; font-weight: 700; }

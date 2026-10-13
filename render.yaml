@@ -17,6 +17,20 @@ services:
         sync: false
       - key: APIFY_ACTOR_ID
         value: apify/instagram-reel-scraper
+      - key: APIFY_RESULTS_LIMIT
+        value: "20"
+      - key: APIFY_DOWNLOAD_VIDEOS
+        value: "false"
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_PUBLIC_BASE_URL
+        sync: false
 
 databases:
   - name: reels-finder-db

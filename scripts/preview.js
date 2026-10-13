@@ -5,6 +5,18 @@ import { createApp } from "../src/app.js";
 const memory = newDb({ noAstCoverageCheck: true });
 const schema = await readFile(new URL("../db/migrations/001_schema.sql", import.meta.url), "utf8");
 memory.public.none(schema);
+memory.public.none(`
+  ALTER TABLE reels ADD COLUMN play_count BIGINT NOT NULL DEFAULT 0;
+  ALTER TABLE reels ADD COLUMN media_status TEXT NOT NULL DEFAULT 'missing';
+  ALTER TABLE reels ADD COLUMN hashtags JSONB NOT NULL DEFAULT '[]';
+  ALTER TABLE reels ADD COLUMN mentions JSONB NOT NULL DEFAULT '[]';
+  ALTER TABLE reels ADD COLUMN transcript TEXT NOT NULL DEFAULT '';
+  ALTER TABLE reels ADD COLUMN owner_username TEXT NOT NULL DEFAULT '';
+  ALTER TABLE reels ADD COLUMN owner_full_name TEXT NOT NULL DEFAULT '';
+  ALTER TABLE reels ADD COLUMN last_synced_at TIMESTAMPTZ;
+  ALTER TABLE sync_runs ADD COLUMN skipped_count INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE sync_runs ADD COLUMN media_stored_count INTEGER NOT NULL DEFAULT 0;
+`);
 const adapter = memory.adapters.createPg();
 const db = new adapter.Pool();
 
@@ -26,7 +38,7 @@ for (const [id, title, thumbnail, seconds, views, likes, favorite] of demoReels)
       hook_text, script_text, cta_text, duration_seconds, views_count, likes_count, is_favorite, published_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())`,
     [competitor.rows[0].id, id, `https://instagram.com/reel/${id}`,
-      "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4", thumbnail, title,
+      null, thumbnail, title,
       "Оригинальное описание рилса", "Ты тоже просыпаешься уставшим?",
       "1. Не бери телефон сразу.\n2. Выпей воды.\n3. Подготовь полезный завтрак.",
       "Сохрани видео и попробуй завтра ❤️", seconds, views, likes, favorite]

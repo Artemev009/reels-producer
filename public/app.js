@@ -57,9 +57,10 @@ async function setView(view) {
 }
 
 function reelCard(reel) {
+  const mediaLabel = reel.media_status === "stored" ? "Сохранено" : reel.video_url ? "Видео" : "Оригинал";
   return `<article class="reel-card" data-card-id="${reel.id}">
     <div class="reel-cover interactive" data-remix="${reel.id}" role="button" tabindex="0" aria-label="Открыть ${escapeHtml(reel.title)}">
-      <img src="${escapeHtml(reel.thumbnail_url)}" alt="Превью: ${escapeHtml(reel.title)}" loading="lazy"><span class="duration">${duration(reel.duration_seconds)}</span>
+      <img src="${escapeHtml(reel.thumbnail_url)}" alt="Превью: ${escapeHtml(reel.title)}" loading="lazy"><span class="media-pill ${escapeHtml(reel.media_status || "missing")}">${mediaLabel}</span><span class="duration">${duration(reel.duration_seconds)}</span>
     </div>
     <h2 class="reel-title">${escapeHtml(reel.title)}</h2><p class="handle">${escapeHtml(reel.instagram_handle || "")}</p>
     <p class="metrics"><span>▷ ${compact(reel.views_count)}</span><span>♡ ${compact(reel.likes_count)}</span></p>
@@ -132,16 +133,17 @@ function bindReelActions() {
 
 async function renderCompetitors() {
   const [competitors, reels] = await Promise.all([api("/api/competitors"), api("/api/reels?sort=latest")]);
-  const current = competitors[0];
+  const statusLabel = (status) => ({ queued: "В очереди", running: "Apify работает", importing: "Импортируем", succeeded: "Готово", partial: "Частично", failed: "Ошибка" })[status] || "Не запускалась";
+  const active = new Set(["queued", "running", "importing"]);
   app.innerHTML = `<section class="page">
     ${pageHead("Конкуренты", "Добавляйте Instagram аккаунты и собирайте их последние рилс")}
     <form class="fetch-panel" id="competitor-form"><div class="url-field"><input class="url-input" name="instagram" placeholder="https://www.instagram.com/username" value="" aria-label="Ссылка на Instagram" required></div><button class="button primary" type="submit">Добавить и загрузить 20 рилс →</button></form>
-    ${current ? `<div class="profile-panel">
-      <img class="profile-photo" src="${escapeHtml(current.avatar_url || reels[0]?.thumbnail_url || "")}" alt=""><div class="profile-copy"><strong>${escapeHtml(current.instagram_handle)}</strong><span>${escapeHtml(current.display_name)}</span></div>
-      <div class="profile-stats"><div class="stat"><strong>${compact(current.posts_count)}</strong><span>публикаций</span></div><div class="stat"><strong>${compact(current.follower_count)}</strong><span>подписчиков</span></div><div class="stat"><strong>${compact(current.following_count)}</strong><span>подписок</span></div></div>
-      <a class="button" href="${escapeHtml(current.profile_url)}" target="_blank" rel="noopener">${icon("external")} Открыть в Instagram</a>
-    </div>` : `<div class="empty">Добавьте первого конкурента.</div>`}
-    <div class="section-head"><h2>Последние рилс</h2><span class="success-pill">${reels.length} записей в PostgreSQL</span>${current ? `<div class="update"><button class="button" id="refresh-reels">${icon("refresh")} Синхронизировать с Apify</button></div>` : ""}</div>
+    <div class="competitor-list">${competitors.length ? competitors.map((competitor) => `<article class="profile-panel">
+      <img class="profile-photo" src="${escapeHtml(competitor.avatar_url || reels.find((reel) => String(reel.competitor_id) === String(competitor.id))?.thumbnail_url || "")}" alt=""><div class="profile-copy"><strong>${escapeHtml(competitor.instagram_handle)}</strong><span>${escapeHtml(competitor.display_name)}</span><small>${competitor.last_synced_at ? `Обновлено ${new Date(competitor.last_synced_at).toLocaleString("ru")}` : "Ещё не синхронизирован"}</small></div>
+      <div class="profile-stats"><div class="stat"><strong>${compact(competitor.reels_count)}</strong><span>рилс</span></div><div class="stat"><strong>${compact(competitor.total_views)}</strong><span>просмотров</span></div><div class="stat"><strong>${statusLabel(competitor.sync_status)}</strong><span>${competitor.sync_error ? escapeHtml(competitor.sync_error) : `${competitor.sync_imported_count || 0} импортировано`}</span></div></div>
+      <div class="profile-actions"><a class="button" href="${escapeHtml(competitor.profile_url)}" target="_blank" rel="noopener">${icon("external")} Instagram</a><button class="button sync-competitor" data-sync-competitor="${competitor.id}" ${active.has(competitor.sync_status) ? "disabled" : ""}>${icon("refresh")} ${active.has(competitor.sync_status) ? "Синхронизация…" : "Обновить"}</button></div>
+    </article>`).join("") : `<div class="empty">Добавьте первого конкурента.</div>`}</div>
+    <div class="section-head"><h2>Последние рилс</h2><span class="success-pill">${reels.length} записей в PostgreSQL</span></div>
     <div class="table-panel"><table class="reels-table"><thead><tr><th>#</th><th>Превью</th><th>Заголовок</th><th>Длительность</th><th>Просмотры</th><th>Статус</th><th></th></tr></thead><tbody>
       ${reels.map((reel, index) => `<tr><td>${index + 1}</td><td><img class="table-preview" src="${escapeHtml(reel.thumbnail_url)}" alt=""></td><td class="table-title">${escapeHtml(reel.title)}</td><td>${duration(reel.duration_seconds)}</td><td>${compact(reel.views_count)}</td><td><span class="status">${escapeHtml(reel.status)}</span></td><td><button class="more" data-remix="${reel.id}" aria-label="Открыть рилс">${icon("more")}</button></td></tr>`).join("")}
     </tbody></table></div>
@@ -154,19 +156,26 @@ async function renderCompetitors() {
     try {
       const competitor = await api("/api/competitors", { method: "POST", body: JSON.stringify({ instagram: new FormData(event.currentTarget).get("instagram") }) });
       try {
-        await api(`/api/competitors/${competitor.id}/sync`, { method: "POST", body: "{}" });
-        showToast("Конкурент добавлен, рилсы импортированы");
+        const run = await api(`/api/competitors/${competitor.id}/sync`, { method: "POST", body: "{}" });
+        showToast(`Синхронизация #${run.id} запущена в фоне`);
       } catch (syncError) {
         showToast(`Конкурент сохранён. ${syncError.message}`);
       }
       await renderCompetitors();
     } catch (error) { showToast(error.message); submit.disabled = false; submit.textContent = "Добавить и загрузить 20 рилс →"; }
   });
-  document.querySelector("#refresh-reels")?.addEventListener("click", async (event) => {
-    event.currentTarget.disabled = true;
-    try { const result = await api(`/api/competitors/${current.id}/sync`, { method: "POST", body: "{}" }); showToast(`Импортировано: ${result.importedCount}`); await renderCompetitors(); }
-    catch (error) { showToast(error.message); event.currentTarget.disabled = false; }
-  });
+  document.querySelectorAll("[data-sync-competitor]").forEach((button) => button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const run = await api(`/api/competitors/${button.dataset.syncCompetitor}/sync`, { method: "POST", body: "{}" });
+      showToast(`Синхронизация #${run.id} запущена`);
+      await renderCompetitors();
+    } catch (error) { showToast(error.message); button.disabled = false; }
+  }));
+  if (competitors.some((competitor) => active.has(competitor.sync_status))) {
+    clearTimeout(renderCompetitors.pollTimer);
+    renderCompetitors.pollTimer = setTimeout(() => { if (activeView === "competitors") renderCompetitors(); }, 4000);
+  }
 }
 
 function segmentsMarkup(reel) {
@@ -187,8 +196,9 @@ async function renderRemix() {
     <div class="breadcrumb">Главная　›　Рилс　›　Remix</div>
     ${pageHead("Remix Reel", "Используйте структуру этого рилса и создайте свой уникальный сценарий")}
     <div class="remix-layout">
-      <div class="video-frame">${reel.video_url ? `<video controls playsinline poster="${escapeHtml(reel.thumbnail_url)}"><source src="${escapeHtml(reel.video_url)}" type="video/mp4">Ваш браузер не поддерживает видео.</video>` : `<img src="${escapeHtml(reel.thumbnail_url)}" alt="${escapeHtml(reel.title)}"><a class="play" href="${escapeHtml(reel.source_url)}" target="_blank" rel="noopener" aria-label="Открыть оригинал">${icon("play")}</a>`}</div>
+      <div class="video-frame">${reel.video_url ? `<video controls playsinline poster="${escapeHtml(reel.thumbnail_url)}" src="${escapeHtml(reel.video_url)}">Ваш браузер не поддерживает видео.</video>` : `<img src="${escapeHtml(reel.thumbnail_url)}" alt="${escapeHtml(reel.title)}"><a class="play" href="${escapeHtml(reel.source_url)}" target="_blank" rel="noopener" aria-label="Открыть оригинал">${icon("play")}</a>`}</div>
       <div>
+        ${reel.media_status === "stored" ? "" : `<div class="notice">${reel.video_url ? "Видео загружено по временной ссылке источника. Подключение R2 сделает его постоянным." : "Видео ещё не импортировано. Можно открыть оригинал в Instagram или повторить синхронизацию."}</div>`}
         <div class="remix-top"><div><h2>${escapeHtml(reel.title)}</h2><p>${escapeHtml(reel.instagram_handle || "")}　•　${compact(reel.views_count)} просмотров　•　${compact(reel.likes_count)} лайков</p></div><button class="more" id="favorite-reel" title="Избранное">${reel.is_favorite ? "★" : icon("star")}</button></div>
         <div class="remix-toggle"><button class="button ${originalMode ? "accent" : ""}" id="show-original">Оригинал</button><button class="button ${!originalMode ? "accent" : ""}" id="show-remix">✦ Мой ремикс</button>${!originalMode ? `<button class="button primary" id="toggle-edit">${editMode ? "Отменить" : "Редактировать"}</button>` : ""}</div>
         <div class="segments">${segmentsMarkup(reel)}</div>

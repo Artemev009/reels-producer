@@ -1,7 +1,7 @@
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { importFromApify } from "./apify.js";
+import { startApifySync } from "./apify.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const publicDirectory = path.join(root, "public");
@@ -10,7 +10,9 @@ const reelFields = `
   r.id, r.competitor_id, r.platform_reel_id, r.source_url, r.video_url, r.thumbnail_url,
   r.title, r.description, r.hook_text, r.script_text, r.cta_text, r.duration_seconds,
   r.views_count, r.likes_count, r.comments_count, r.shares_count, r.is_favorite,
-  r.status, r.published_at, r.created_at, r.updated_at,
+  r.play_count, r.media_status, r.hashtags, r.mentions, r.transcript,
+  r.owner_username, r.owner_full_name, r.status, r.published_at, r.last_synced_at,
+  r.created_at, r.updated_at,
   c.instagram_handle, c.display_name AS competitor_name
 `;
 
@@ -55,7 +57,7 @@ function publicError(error) {
   return { status: error.statusCode || 500, message: error.statusCode ? error.message : "Внутренняя ошибка сервера" };
 }
 
-export function createApp({ db, apifyImporter = importFromApify }) {
+export function createApp({ db, apifyImporter = startApifySync }) {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "256kb" }));
@@ -70,16 +72,40 @@ export function createApp({ db, apifyImporter = importFromApify }) {
   });
 
   app.get("/api/competitors", async (_request, response) => {
-    const result = await db.query(`
-      SELECT c.*,
-        COUNT(r.id)::INTEGER AS reels_count,
-        COALESCE(SUM(r.views_count), 0)::BIGINT AS total_views
-      FROM competitors c
-      LEFT JOIN reels r ON r.competitor_id = c.id
-      GROUP BY c.id
-      ORDER BY c.created_at DESC
-    `);
-    response.json({ data: result.rows });
+    const [competitors, aggregates, syncs] = await Promise.all([
+      db.query("SELECT * FROM competitors ORDER BY created_at DESC"),
+      db.query(`
+        SELECT competitor_id, COUNT(*)::INTEGER AS reels_count,
+          COALESCE(SUM(views_count), 0)::BIGINT AS total_views
+        FROM reels
+        GROUP BY competitor_id
+      `),
+      db.query("SELECT * FROM sync_runs ORDER BY id DESC")
+    ]);
+    const aggregateByCompetitor = new Map(
+      aggregates.rows.map((row) => [String(row.competitor_id), row])
+    );
+    const latestByCompetitor = new Map();
+    for (const sync of syncs.rows) {
+      if (!latestByCompetitor.has(String(sync.competitor_id))) latestByCompetitor.set(String(sync.competitor_id), sync);
+    }
+    const data = competitors.rows.map((competitor) => {
+      const sync = latestByCompetitor.get(String(competitor.id));
+      const aggregate = aggregateByCompetitor.get(String(competitor.id));
+      return {
+        ...competitor,
+        reels_count: aggregate?.reels_count || 0,
+        total_views: aggregate?.total_views || 0,
+        sync_run_id: sync?.id || null,
+        sync_status: sync?.status || null,
+        sync_imported_count: sync?.imported_count || 0,
+        sync_skipped_count: sync?.skipped_count || 0,
+        sync_error: sync?.error_message || null,
+        sync_started_at: sync?.started_at || null,
+        sync_finished_at: sync?.finished_at || null
+      };
+    });
+    response.json({ data });
   });
 
   app.post("/api/competitors", async (request, response) => {
@@ -104,8 +130,14 @@ export function createApp({ db, apifyImporter = importFromApify }) {
     const id = parseId(request.params.id);
     const result = await db.query("SELECT * FROM competitors WHERE id = $1", [id]);
     if (!result.rowCount) return response.status(404).json({ error: "Конкурент не найден" });
-    const imported = await apifyImporter(db, result.rows[0]);
-    response.json({ data: imported });
+    const syncRun = await apifyImporter(db, result.rows[0]);
+    response.status(202).json({ data: syncRun });
+  });
+
+  app.get("/api/sync-runs/:id", async (request, response) => {
+    const result = await db.query("SELECT * FROM sync_runs WHERE id = $1", [parseId(request.params.id)]);
+    if (!result.rowCount) return response.status(404).json({ error: "Синхронизация не найдена" });
+    response.json({ data: result.rows[0] });
   });
 
   app.get("/api/reels", async (request, response) => {
@@ -122,8 +154,12 @@ export function createApp({ db, apifyImporter = importFromApify }) {
     }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const order = request.query.sort === "views" ? "r.views_count DESC" : "r.published_at DESC NULLS LAST, r.id DESC";
+    const limit = Math.min(200, Math.max(1, Number(request.query.limit) || 100));
+    const offset = Math.max(0, Number(request.query.offset) || 0);
+    values.push(limit, offset);
     const result = await db.query(
-      `SELECT ${reelFields} FROM reels r LEFT JOIN competitors c ON c.id = r.competitor_id ${where} ORDER BY ${order} LIMIT 200`,
+      `SELECT ${reelFields} FROM reels r LEFT JOIN competitors c ON c.id = r.competitor_id ${where}
+       ORDER BY ${order} LIMIT $${values.length - 1} OFFSET $${values.length}`,
       values
     );
     response.json({ data: result.rows });

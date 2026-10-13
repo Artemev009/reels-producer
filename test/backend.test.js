@@ -5,6 +5,19 @@ import { newDb } from "pg-mem";
 import { normalizeApifyReel } from "../src/apify.js";
 import { createApp } from "../src/app.js";
 
+function addCurrentReelColumns(memory) {
+  memory.public.none(`
+    ALTER TABLE reels ADD COLUMN play_count BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE reels ADD COLUMN media_status TEXT NOT NULL DEFAULT 'missing';
+    ALTER TABLE reels ADD COLUMN hashtags JSONB NOT NULL DEFAULT '[]';
+    ALTER TABLE reels ADD COLUMN mentions JSONB NOT NULL DEFAULT '[]';
+    ALTER TABLE reels ADD COLUMN transcript TEXT NOT NULL DEFAULT '';
+    ALTER TABLE reels ADD COLUMN owner_username TEXT NOT NULL DEFAULT '';
+    ALTER TABLE reels ADD COLUMN owner_full_name TEXT NOT NULL DEFAULT '';
+    ALTER TABLE reels ADD COLUMN last_synced_at TIMESTAMPTZ;
+  `);
+}
+
 test("PostgreSQL migration creates the application tables", async () => {
   const memory = newDb({ noAstCoverageCheck: true });
   const schema = await readFile(new URL("../db/migrations/001_schema.sql", import.meta.url), "utf8");
@@ -35,12 +48,15 @@ test("Apify output is normalized into the SQL reel model", () => {
   assert.equal(reel.title, "Hook text");
   assert.equal(reel.durationSeconds, 32);
   assert.equal(reel.viewsCount, 1200);
+  assert.equal(reel.videoUrl, "https://cdn.example/video.mp4");
+  assert.equal(reel.hookText, "Hook text");
 });
 
 test("REST API reads seeded reels and persists a script", async () => {
   const memory = newDb({ noAstCoverageCheck: true });
   const schema = await readFile(new URL("../db/migrations/001_schema.sql", import.meta.url), "utf8");
   memory.public.none(schema);
+  addCurrentReelColumns(memory);
   const adapter = memory.adapters.createPg();
   const pool = new adapter.Pool();
   const competitor = await pool.query(
@@ -55,7 +71,14 @@ test("REST API reads seeded reels and persists a script", async () => {
     "INSERT INTO scripts(reel_id, title) VALUES ($1, 'Existing script')",
     [reel.rows[0].id]
   );
-  const server = createApp({ db: pool }).listen(0, "127.0.0.1");
+  const server = createApp({
+    db: pool,
+    apifyImporter: async (_db, selectedCompetitor) => ({
+      id: 77,
+      competitor_id: selectedCompetitor.id,
+      status: "queued"
+    })
+  }).listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   const address = server.address();
   const base = `http://127.0.0.1:${address.port}`;
@@ -65,6 +88,17 @@ test("REST API reads seeded reels and persists a script", async () => {
     const reels = (await reelsResponse.json()).data;
     assert.equal(reelsResponse.status, 200);
     assert.equal(reels.length, 1);
+
+    const competitorsResponse = await fetch(`${base}/api/competitors`);
+    const competitors = (await competitorsResponse.json()).data;
+    assert.equal(competitorsResponse.status, 200);
+    assert.equal(competitors[0].reels_count, 1);
+    assert.equal(Number(competitors[0].total_views), 0);
+
+    const syncResponse = await fetch(`${base}/api/competitors/${competitors[0].id}/sync`, { method: "POST" });
+    const syncRun = (await syncResponse.json()).data;
+    assert.equal(syncResponse.status, 202);
+    assert.equal(syncRun.status, "queued");
 
     const scriptResponse = await fetch(`${base}/api/scripts`, {
       method: "POST",
