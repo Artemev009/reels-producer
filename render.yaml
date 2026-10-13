@@ -21,6 +21,14 @@ services:
         value: "20"
       - key: APIFY_DOWNLOAD_VIDEOS
         value: "false"
+      - key: DATABASE_MEDIA_CACHE
+        value: "true"
+      - key: DATABASE_MEDIA_REELS_LIMIT
+        value: "5"
+      - key: DATABASE_MEDIA_TOTAL_BYTES
+        value: "293601280"
+      - key: DATABASE_MEDIA_VIDEO_MAX_BYTES
+        value: "52428800"
       - key: R2_ACCOUNT_ID
         sync: false
       - key: R2_ACCESS_KEY_ID

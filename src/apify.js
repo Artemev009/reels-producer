@@ -1,4 +1,4 @@
-import { createMediaStorage } from "./storage.js";
+import { createMediaStorage, downloadRemote } from "./storage.js";
 
 function number(value) {
   const parsed = Number(value);
@@ -38,7 +38,7 @@ export function normalizeApifyReel(item, competitorId) {
     ownerUsername: text(item.ownerUsername), ownerFullName: text(item.ownerFullName),
     ownerAvatarUrl: text(item.ownerProfilePicUrl, item.ownerProfilePicUrlHd),
     durationSeconds: number(item.videoDuration ?? item.duration),
-    viewsCount: number(item.videoViewCount ?? item.viewCount ?? item.viewsCount),
+    viewsCount: number(item.videoViewCount ?? item.viewCount ?? item.viewsCount) || number(item.videoPlayCount ?? item.playCount),
     playCount: number(item.videoPlayCount ?? item.playCount),
     likesCount: number(item.likesCount ?? item.likes),
     commentsCount: number(item.commentsCount ?? item.comments),
@@ -49,18 +49,61 @@ export function normalizeApifyReel(item, competitorId) {
 
 async function saveAsset(db, reelId, kind, asset) {
   await db.query(
-    `INSERT INTO media_assets(reel_id, kind, storage_provider, storage_key, public_url, source_url, content_type, size_bytes)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    `INSERT INTO media_assets(reel_id, kind, storage_provider, storage_key, public_url, source_url, content_type, size_bytes, content)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
      ON CONFLICT (reel_id, kind) DO UPDATE SET
        storage_provider = EXCLUDED.storage_provider, storage_key = EXCLUDED.storage_key,
        public_url = EXCLUDED.public_url, source_url = EXCLUDED.source_url,
-       content_type = EXCLUDED.content_type, size_bytes = EXCLUDED.size_bytes, updated_at = NOW()`,
-    [reelId, kind, asset.provider, asset.key, asset.publicUrl, asset.sourceUrl, asset.contentType, asset.sizeBytes]
+       content_type = EXCLUDED.content_type, size_bytes = EXCLUDED.size_bytes,
+       content = EXCLUDED.content, updated_at = NOW()`,
+    [reelId, kind, asset.provider, asset.key, asset.publicUrl, asset.sourceUrl, asset.contentType, asset.sizeBytes, asset.content || null]
   );
 }
 
-async function persistMedia(db, storage, reelId, reel) {
-  if (!storage.configured || (!reel.videoUrl && !reel.thumbnailUrl)) return { stored: 0, failed: 0 };
+function databaseCacheEnabled(env) {
+  return String(env.DATABASE_MEDIA_CACHE || "true").toLowerCase() !== "false";
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+async function hasDatabaseCacheSlot(db, reelId, env) {
+  const existing = await db.query(
+    "SELECT 1 FROM media_assets WHERE reel_id = $1 AND kind = 'video' AND storage_provider = 'postgres' AND content IS NOT NULL",
+    [reelId]
+  );
+  if (existing.rowCount) return true;
+  const usage = await db.query(
+    `SELECT COUNT(DISTINCT reel_id) FILTER (WHERE kind = 'video')::INTEGER AS reel_count,
+       COALESCE(SUM(size_bytes), 0)::BIGINT AS total_bytes
+     FROM media_assets WHERE storage_provider = 'postgres' AND content IS NOT NULL`
+  );
+  const limit = positiveInteger(env.DATABASE_MEDIA_REELS_LIMIT, 5);
+  const maxBytes = positiveInteger(env.DATABASE_MEDIA_TOTAL_BYTES, 280 * 1024 * 1024);
+  return Number(usage.rows[0].reel_count) < limit && Number(usage.rows[0].total_bytes) < maxBytes;
+}
+
+async function storeInDatabase({ reelId, kind, sourceUrl, env }) {
+  const maxBytes = kind === "video"
+    ? positiveInteger(env.DATABASE_MEDIA_VIDEO_MAX_BYTES, 50 * 1024 * 1024)
+    : positiveInteger(env.DATABASE_MEDIA_THUMBNAIL_MAX_BYTES, 5 * 1024 * 1024);
+  const { bytes, contentType } = await downloadRemote(sourceUrl, { maxBytes, kind });
+  return {
+    provider: "postgres",
+    key: null,
+    publicUrl: `/api/media/${reelId}/${kind}`,
+    contentType,
+    sizeBytes: bytes.byteLength,
+    sourceUrl,
+    content: Buffer.from(bytes)
+  };
+}
+
+async function persistMedia(db, storage, reelId, reel, env = process.env) {
+  const useDatabase = !storage.configured && databaseCacheEnabled(env) && await hasDatabaseCacheSlot(db, reelId, env);
+  if ((!storage.configured && !useDatabase) || (!reel.videoUrl && !reel.thumbnailUrl)) return { stored: 0, failed: 0 };
   await db.query("UPDATE reels SET media_status = 'storing' WHERE id = $1", [reelId]);
   let stored = 0;
   let failed = 0;
@@ -68,7 +111,9 @@ async function persistMedia(db, storage, reelId, reel) {
   for (const [kind, sourceUrl] of [["video", reel.videoUrl], ["thumbnail", reel.thumbnailUrl]]) {
     if (!sourceUrl) continue;
     try {
-      const asset = await storage.storeRemote({ reelId, kind, sourceUrl });
+      const asset = storage.configured
+        ? await storage.storeRemote({ reelId, kind, sourceUrl })
+        : await storeInDatabase({ reelId, kind, sourceUrl, env });
       if (!asset) continue;
       await saveAsset(db, reelId, kind, asset);
       const column = kind === "video" ? "video_url" : "thumbnail_url";
@@ -80,9 +125,9 @@ async function persistMedia(db, storage, reelId, reel) {
       console.error(`Media ${kind} failed for reel ${reelId}:`, error.message);
     }
   }
-  const mediaStatus = failed ? "failed" : videoStored ? "stored" : reel.videoUrl ? "external" : "missing";
+  const mediaStatus = videoStored ? "stored" : reel.videoUrl ? "external" : "missing";
   await db.query("UPDATE reels SET media_status = $1, updated_at = NOW() WHERE id = $2", [mediaStatus, reelId]);
-  return { stored, failed };
+  return { stored, failed, videoStored };
 }
 
 export async function runApifySync(db, competitor, syncRunId, { storage = createMediaStorage(), env = process.env } = {}) {
@@ -130,7 +175,8 @@ export async function runApifySync(db, competitor, syncRunId, { storage = create
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW())
         ON CONFLICT (platform_reel_id) DO UPDATE SET
           competitor_id = EXCLUDED.competitor_id, source_url = EXCLUDED.source_url,
-          video_url = COALESCE(EXCLUDED.video_url, reels.video_url), thumbnail_url = EXCLUDED.thumbnail_url,
+          video_url = CASE WHEN reels.media_status = 'stored' THEN reels.video_url ELSE COALESCE(EXCLUDED.video_url, reels.video_url) END,
+          thumbnail_url = CASE WHEN reels.media_status = 'stored' THEN reels.thumbnail_url ELSE EXCLUDED.thumbnail_url END,
           title = EXCLUDED.title, description = EXCLUDED.description, transcript = EXCLUDED.transcript,
           hashtags = EXCLUDED.hashtags, mentions = EXCLUDED.mentions, audio = EXCLUDED.audio,
           owner_username = EXCLUDED.owner_username, owner_full_name = EXCLUDED.owner_full_name,
@@ -152,7 +198,7 @@ export async function runApifySync(db, competitor, syncRunId, { storage = create
          VALUES ($1,$2,$3,$4,$5,$6)`,
         [reelId, reel.viewsCount, reel.playCount, reel.likesCount, reel.commentsCount, reel.sharesCount]
       );
-      const media = await persistMedia(db, storage, reelId, reel);
+      const media = await persistMedia(db, storage, reelId, reel, env);
       mediaStoredCount += media.stored; mediaFailures += media.failed; importedCount += 1;
     }
     if (firstReel) {
@@ -173,6 +219,32 @@ export async function runApifySync(db, competitor, syncRunId, { storage = create
     await db.query("UPDATE sync_runs SET status = 'failed', error_message = $1, finished_at = NOW() WHERE id = $2", [String(error.message).slice(0, 1000), syncRunId]);
     throw error;
   }
+}
+
+export async function warmDatabaseMediaCache(db, { storage = createMediaStorage(), env = process.env } = {}) {
+  if (storage.configured || !databaseCacheEnabled(env)) return { storedReels: 0, skipped: true };
+  const limit = positiveInteger(env.DATABASE_MEDIA_REELS_LIMIT, 5);
+  const candidates = await db.query(
+    `SELECT id, video_url, thumbnail_url
+     FROM reels
+     WHERE video_url IS NOT NULL
+       AND video_url NOT LIKE '/api/media/%'
+       AND platform_reel_id NOT LIKE 'demo-%'
+     ORDER BY published_at DESC NULLS LAST, id DESC
+     LIMIT $1`,
+    [limit * 4]
+  );
+  let storedReels = 0;
+  for (const row of candidates.rows) {
+    if (!await hasDatabaseCacheSlot(db, row.id, env)) break;
+    const result = await persistMedia(db, storage, row.id, {
+      videoUrl: row.video_url,
+      thumbnailUrl: row.thumbnail_url
+    }, env);
+    if (result.videoStored) storedReels += 1;
+  }
+  console.log(`PostgreSQL media cache warmed: ${storedReels} reel(s)`);
+  return { storedReels, skipped: false };
 }
 
 export async function startApifySync(db, competitor, options = {}) {

@@ -7,6 +7,7 @@
 ```text
 Browser UI → Express REST API → PostgreSQL
                          ├── Apify (асинхронный импорт Reels)
+                         ├── PostgreSQL BYTEA (короткий бесплатный демо-кеш)
                          └── Cloudflare R2 (постоянные видео и обложки, опционально)
 ```
 
@@ -37,6 +38,7 @@ npm start
 - `GET /api/sync-runs/:id`
 - `GET /api/reels`
 - `GET/PATCH/DELETE /api/reels/:id`
+- `GET /api/media/:reelId/:kind`
 - `GET/POST /api/scripts`
 - `PATCH/DELETE /api/scripts/:id`
 - `GET /health`
@@ -52,7 +54,9 @@ npm start
 
 После этого кнопка синхронизации создаёт фоновую задачу, запускает Actor, получает до 20 записей из Dataset и делает UPSERT в таблицу `reels`. Интерфейс показывает состояния `queued`, `running`, `importing`, `succeeded`, `partial` и `failed`.
 
-По умолчанию используются прямые MP4-ссылки из Dataset. Для постоянного хранения видео и обложек задайте параметры Cloudflare R2:
+По умолчанию до 5 рилсов кешируются в PostgreSQL, чтобы тестовый стенд не зависел от истекающих Instagram CDN-ссылок. Это намеренно ограниченный временный вариант для демонстрации, а не долговременное медиахранилище. Лимиты регулируются переменными `DATABASE_MEDIA_REELS_LIMIT`, `DATABASE_MEDIA_TOTAL_BYTES` и `DATABASE_MEDIA_VIDEO_MAX_BYTES`.
+
+Для постоянного хранения видео и обложек задайте параметры Cloudflare R2:
 
 - `R2_ACCOUNT_ID`;
 - `R2_ACCESS_KEY_ID`;
@@ -60,7 +64,7 @@ npm start
 - `R2_BUCKET`;
 - `R2_PUBLIC_BASE_URL`.
 
-Без полного набора R2-переменных приложение продолжает работать, но помечает медиа как внешние и предупреждает, что ссылка источника может истечь.
+Без полного набора R2-переменных остальные рилсы продолжают использовать внешние ссылки и предупреждают, что ссылка источника может истечь.
 
 ## Render
 

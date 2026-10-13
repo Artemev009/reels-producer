@@ -57,6 +57,25 @@ function publicError(error) {
   return { status: error.statusCode || 500, message: error.statusCode ? error.message : "Внутренняя ошибка сервера" };
 }
 
+function byteRange(header, size) {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header);
+  if (!match || (!match[1] && !match[2])) return false;
+  let start;
+  let end;
+  if (!match[1]) {
+    const suffix = Number(match[2]);
+    if (!Number.isSafeInteger(suffix) || suffix < 1) return false;
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(match[1]);
+    end = match[2] ? Number(match[2]) : size - 1;
+  }
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= size || end < start) return false;
+  return { start, end: Math.min(end, size - 1) };
+}
+
 export function createApp({ db, apifyImporter = startApifySync }) {
   const app = express();
   app.disable("x-powered-by");
@@ -69,6 +88,39 @@ export function createApp({ db, apifyImporter = startApifySync }) {
     } catch {
       response.status(503).json({ status: "error", database: "unavailable" });
     }
+  });
+
+  app.get("/api/media/:reelId/:kind", async (request, response) => {
+    const kind = request.params.kind;
+    if (!["video", "thumbnail"].includes(kind)) return response.status(404).json({ error: "Медиафайл не найден" });
+    const result = await db.query(
+      `SELECT content, content_type, size_bytes
+       FROM media_assets
+       WHERE reel_id = $1 AND kind = $2 AND storage_provider = 'postgres' AND content IS NOT NULL`,
+      [parseId(request.params.reelId, "reelId"), kind]
+    );
+    if (!result.rowCount) return response.status(404).json({ error: "Медиафайл не найден" });
+    const content = Buffer.from(result.rows[0].content);
+    const range = byteRange(request.headers.range, content.length);
+    response.set({
+      "Accept-Ranges": "bytes",
+      "Cache-Control": "public, max-age=86400",
+      "Content-Type": result.rows[0].content_type || (kind === "video" ? "video/mp4" : "image/jpeg")
+    });
+    if (range === false) {
+      response.set("Content-Range", `bytes */${content.length}`);
+      return response.status(416).end();
+    }
+    if (range) {
+      const chunk = content.subarray(range.start, range.end + 1);
+      response.set({
+        "Content-Length": String(chunk.length),
+        "Content-Range": `bytes ${range.start}-${range.end}/${content.length}`
+      });
+      return response.status(206).end(chunk);
+    }
+    response.set("Content-Length", String(content.length));
+    return response.end(content);
   });
 
   app.get("/api/competitors", async (_request, response) => {

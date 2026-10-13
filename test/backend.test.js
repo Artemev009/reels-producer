@@ -15,6 +15,21 @@ function addCurrentReelColumns(memory) {
     ALTER TABLE reels ADD COLUMN owner_username TEXT NOT NULL DEFAULT '';
     ALTER TABLE reels ADD COLUMN owner_full_name TEXT NOT NULL DEFAULT '';
     ALTER TABLE reels ADD COLUMN last_synced_at TIMESTAMPTZ;
+    CREATE TABLE media_assets (
+      id BIGSERIAL PRIMARY KEY,
+      reel_id BIGINT NOT NULL REFERENCES reels(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      storage_provider TEXT NOT NULL,
+      storage_key TEXT,
+      public_url TEXT NOT NULL,
+      source_url TEXT,
+      content_type TEXT,
+      size_bytes BIGINT,
+      content BYTEA,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (reel_id, kind)
+    );
   `);
 }
 
@@ -50,6 +65,15 @@ test("Apify output is normalized into the SQL reel model", () => {
   assert.equal(reel.viewsCount, 1200);
   assert.equal(reel.videoUrl, "https://cdn.example/video.mp4");
   assert.equal(reel.hookText, "Hook text");
+
+  const fallback = normalizeApifyReel({
+    id: "with-plays",
+    url: "https://instagram.com/reel/with-plays",
+    displayUrl: "https://cdn.example/preview.jpg",
+    videoViewCount: 0,
+    videoPlayCount: 9876
+  }, 42);
+  assert.equal(fallback.viewsCount, 9876);
 });
 
 test("REST API reads seeded reels and persists a script", async () => {
@@ -120,6 +144,19 @@ test("REST API reads seeded reels and persists a script", async () => {
     assert.equal((await updateResponse.json()).data.status, "ready");
     const scripts = (await (await fetch(`${base}/api/scripts`)).json()).data;
     assert.equal(scripts.length, 2);
+
+    const video = Buffer.from("0123456789");
+    await pool.query(
+      `INSERT INTO media_assets(reel_id, kind, storage_provider, public_url, content_type, size_bytes, content)
+       VALUES ($1, 'video', 'postgres', $2, 'video/mp4', $3, $4)`,
+      [reel.rows[0].id, `/api/media/${reel.rows[0].id}/video`, video.length, video]
+    );
+    const mediaResponse = await fetch(`${base}/api/media/${reel.rows[0].id}/video`, {
+      headers: { Range: "bytes=2-5" }
+    });
+    assert.equal(mediaResponse.status, 206);
+    assert.equal(mediaResponse.headers.get("content-range"), "bytes 2-5/10");
+    assert.equal(Buffer.from(await mediaResponse.arrayBuffer()).toString(), "2345");
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await pool.end();

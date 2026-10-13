@@ -13,6 +13,18 @@ function extensionFor(contentType, fallback) {
   return fallback;
 }
 
+export async function downloadRemote(sourceUrl, { maxBytes = 50 * 1024 * 1024, kind = "media" } = {}) {
+  const response = await fetch(sourceUrl, { signal: AbortSignal.timeout(90_000) });
+  if (!response.ok) throw new Error(`Не удалось скачать ${kind}: ${response.status}`);
+  const advertisedLength = Number(response.headers.get("content-length") || 0);
+  if (advertisedLength > maxBytes) throw new Error(`${kind} превышает лимит хранения`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > maxBytes) throw new Error(`${kind} превышает лимит хранения`);
+  const contentType = response.headers.get("content-type")?.split(";")[0] ||
+    (kind === "video" ? "video/mp4" : "image/jpeg");
+  return { bytes, contentType };
+}
+
 export function createMediaStorage(env = process.env) {
   const accountId = String(env.R2_ACCOUNT_ID || "").trim();
   const accessKeyId = String(env.R2_ACCESS_KEY_ID || "").trim();
@@ -29,14 +41,7 @@ export function createMediaStorage(env = process.env) {
 
   async function storeRemote({ reelId, kind, sourceUrl }) {
     if (!configured || !sourceUrl) return null;
-    const response = await fetch(sourceUrl, { signal: AbortSignal.timeout(90_000) });
-    if (!response.ok) throw new Error(`Не удалось скачать ${kind}: ${response.status}`);
-    const advertisedLength = Number(response.headers.get("content-length") || 0);
-    if (advertisedLength > maxBytes) throw new Error(`${kind} превышает лимит хранения`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength > maxBytes) throw new Error(`${kind} превышает лимит хранения`);
-    const contentType = response.headers.get("content-type")?.split(";")[0] ||
-      (kind === "video" ? "video/mp4" : "image/jpeg");
+    const { bytes, contentType } = await downloadRemote(sourceUrl, { maxBytes, kind });
     const extension = extensionFor(contentType, kind === "video" ? "mp4" : "jpg");
     const key = `reels/${reelId}/${kind}.${extension}`;
     await client.send(new PutObjectCommand({
