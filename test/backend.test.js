@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { newDb } from "pg-mem";
-import { normalizeApifyReel } from "../src/apify.js";
+import { backfillMissingSegments, normalizeApifyReel } from "../src/apify.js";
 import { createApp } from "../src/app.js";
 
 function addCurrentReelColumns(memory) {
@@ -65,6 +65,17 @@ test("Apify output is normalized into the SQL reel model", () => {
   assert.equal(reel.viewsCount, 1200);
   assert.equal(reel.videoUrl, "https://cdn.example/video.mp4");
   assert.equal(reel.hookText, "Hook text");
+  assert.ok(reel.ctaText.includes("не найден"));
+
+  const structured = normalizeApifyReel({
+    id: "structured",
+    url: "https://instagram.com/reel/structured",
+    displayUrl: "https://cdn.example/preview.jpg",
+    caption: "A strong hook.\nThe useful middle.\nSave this post for later."
+  }, 42);
+  assert.equal(structured.hookText, "A strong hook.");
+  assert.equal(structured.scriptText, "The useful middle.");
+  assert.equal(structured.ctaText, "Save this post for later.");
 
   const fallback = normalizeApifyReel({
     id: "with-plays",
@@ -92,11 +103,21 @@ test("REST API reads seeded reels and persists a script", async () => {
     [competitor.rows[0].id]
   );
   await pool.query(
+    "UPDATE reels SET description = 'Start here. Useful middle. Save this post.' WHERE id = $1",
+    [reel.rows[0].id]
+  );
+  assert.equal(await backfillMissingSegments(pool), 1);
+  const segments = await pool.query("SELECT hook_text, script_text, cta_text FROM reels WHERE id = $1", [reel.rows[0].id]);
+  assert.equal(segments.rows[0].hook_text, "Start here.");
+  assert.equal(segments.rows[0].script_text, "Useful middle.");
+  assert.equal(segments.rows[0].cta_text, "Save this post.");
+  await pool.query(
     "INSERT INTO scripts(reel_id, title) VALUES ($1, 'Existing script')",
     [reel.rows[0].id]
   );
   const server = createApp({
     db: pool,
+    env: { SCRIPT_LIMIT: "2", SYNC_COOLDOWN_MINUTES: "10", SYNC_HOURLY_LIMIT: "3", SYNC_DAILY_LIMIT: "10" },
     apifyImporter: async (_db, selectedCompetitor) => ({
       id: 77,
       competitor_id: selectedCompetitor.id,
@@ -144,6 +165,23 @@ test("REST API reads seeded reels and persists a script", async () => {
     assert.equal((await updateResponse.json()).data.status, "ready");
     const scripts = (await (await fetch(`${base}/api/scripts`)).json()).data;
     assert.equal(scripts.length, 2);
+
+    const limitedScriptResponse = await fetch(`${base}/api/scripts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Over the demo limit" })
+    });
+    assert.equal(limitedScriptResponse.status, 429);
+
+    await pool.query(
+      `INSERT INTO sync_runs(competitor_id, status) VALUES
+       ($1, 'succeeded'), ($1, 'succeeded'), ($1, 'succeeded')`,
+      [competitor.rows[0].id]
+    );
+    const limitedSyncResponse = await fetch(`${base}/api/competitors/${competitor.rows[0].id}/sync`, {
+      method: "POST"
+    });
+    assert.equal(limitedSyncResponse.status, 429);
 
     const video = Buffer.from("0123456789");
     await pool.query(

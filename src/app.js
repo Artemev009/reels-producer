@@ -57,6 +57,41 @@ function publicError(error) {
   return { status: error.statusCode || 500, message: error.statusCode ? error.message : "Внутренняя ошибка сервера" };
 }
 
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function limitError(message) {
+  return Object.assign(new Error(message), { statusCode: 429 });
+}
+
+async function enforceSyncBudget(db, competitorId, env) {
+  const active = await db.query(
+    "SELECT 1 FROM sync_runs WHERE competitor_id = $1 AND status IN ('queued','running','importing') LIMIT 1",
+    [competitorId]
+  );
+  if (active.rowCount) return;
+  const now = Date.now();
+  const cooldownMinutes = positiveInteger(env.SYNC_COOLDOWN_MINUTES, 10);
+  const hourlyLimit = positiveInteger(env.SYNC_HOURLY_LIMIT, 3);
+  const dailyLimit = positiveInteger(env.SYNC_DAILY_LIMIT, 10);
+  const [latest, hourly, daily] = await Promise.all([
+    db.query("SELECT started_at FROM sync_runs WHERE competitor_id = $1 ORDER BY started_at DESC LIMIT 1", [competitorId]),
+    db.query("SELECT COUNT(*)::INTEGER AS count FROM sync_runs WHERE started_at >= $1", [new Date(now - 60 * 60 * 1000)]),
+    db.query("SELECT COUNT(*)::INTEGER AS count FROM sync_runs WHERE started_at >= $1", [new Date(now - 24 * 60 * 60 * 1000)])
+  ]);
+  if (latest.rowCount && now - new Date(latest.rows[0].started_at).getTime() < cooldownMinutes * 60 * 1000) {
+    throw limitError(`Повторная загрузка этого аккаунта будет доступна через ${cooldownMinutes} минут`);
+  }
+  if (Number(hourly.rows[0].count) >= hourlyLimit) {
+    throw limitError(`Бесплатный лимит: не более ${hourlyLimit} загрузок в час`);
+  }
+  if (Number(daily.rows[0].count) >= dailyLimit) {
+    throw limitError(`Бесплатный лимит: не более ${dailyLimit} загрузок в сутки`);
+  }
+}
+
 function byteRange(header, size) {
   if (!header) return null;
   const match = /^bytes=(\d*)-(\d*)$/.exec(header);
@@ -76,7 +111,7 @@ function byteRange(header, size) {
   return { start, end: Math.min(end, size - 1) };
 }
 
-export function createApp({ db, apifyImporter = startApifySync }) {
+export function createApp({ db, apifyImporter = startApifySync, env = process.env }) {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "256kb" }));
@@ -162,6 +197,12 @@ export function createApp({ db, apifyImporter = startApifySync }) {
 
   app.post("/api/competitors", async (request, response) => {
     const { handle, profileUrl } = normalizeInstagram(request.body.instagram || request.body.profile_url || "");
+    const existing = await db.query("SELECT id FROM competitors WHERE instagram_handle = $1", [handle]);
+    if (!existing.rowCount) {
+      const count = await db.query("SELECT COUNT(*)::INTEGER AS count FROM competitors");
+      const limit = positiveInteger(env.COMPETITOR_LIMIT, 10);
+      if (Number(count.rows[0].count) >= limit) throw limitError(`Бесплатный стенд поддерживает до ${limit} конкурентов`);
+    }
     const result = await db.query(
       `INSERT INTO competitors(instagram_handle, profile_url, display_name)
        VALUES ($1, $2, $1)
@@ -182,6 +223,7 @@ export function createApp({ db, apifyImporter = startApifySync }) {
     const id = parseId(request.params.id);
     const result = await db.query("SELECT * FROM competitors WHERE id = $1", [id]);
     if (!result.rowCount) return response.status(404).json({ error: "Конкурент не найден" });
+    await enforceSyncBudget(db, id, env);
     const syncRun = await apifyImporter(db, result.rows[0]);
     response.status(202).json({ data: syncRun });
   });
@@ -279,6 +321,9 @@ export function createApp({ db, apifyImporter = startApifySync }) {
   });
 
   app.post("/api/scripts", async (request, response) => {
+    const scriptCount = await db.query("SELECT COUNT(*)::INTEGER AS count FROM scripts");
+    const scriptLimit = positiveInteger(env.SCRIPT_LIMIT, 200);
+    if (Number(scriptCount.rows[0].count) >= scriptLimit) throw limitError(`Бесплатный стенд поддерживает до ${scriptLimit} сценариев`);
     const reelId = request.body.reel_id ? parseId(request.body.reel_id, "reel_id") : null;
     let source = null;
     if (reelId) {
@@ -328,8 +373,8 @@ export function createApp({ db, apifyImporter = startApifySync }) {
   app.get("/{*path}", (_request, response) => response.sendFile(path.join(publicDirectory, "index.html")));
 
   app.use((error, _request, response, _next) => {
-    console.error(error);
     const result = publicError(error);
+    if (result.status >= 500) console.error(error);
     response.status(result.status).json({ error: result.message });
   });
 

@@ -14,9 +14,17 @@ function stringList(value) {
 }
 
 function fallbackSegments(description) {
-  const lines = description.split(/\n+/).map((line) => line.trim()).filter(Boolean);
-  const hook = (lines[0] || description.split(/[.!?]/)[0] || "").slice(0, 500);
-  return { hook, script: description, cta: "" };
+  const parts = description
+    .split(/\n+|(?<=[.!?])\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const hook = (parts[0] || description.split(/[.!?]/)[0] || "").slice(0, 500);
+  const ctaPattern = /(сохрани|подпиш|напиши|поделись|отправ|переходи|ссылка в профиле|save|follow|comment|share|send|check out|link in bio|learn more|read more|watch more)/i;
+  const cta = [...parts].reverse().find((part) => ctaPattern.test(part)) ||
+    "CTA в исходном описании не найден. Добавьте свой призыв при редактировании.";
+  const scriptParts = parts.filter((part, index) => index !== 0 && part !== cta);
+  const script = scriptParts.join("\n") || description || hook;
+  return { hook, script, cta };
 }
 
 export function normalizeApifyReel(item, competitorId) {
@@ -245,6 +253,27 @@ export async function warmDatabaseMediaCache(db, { storage = createMediaStorage(
   }
   console.log(`PostgreSQL media cache warmed: ${storedReels} reel(s)`);
   return { storedReels, skipped: false };
+}
+
+export async function backfillMissingSegments(db) {
+  const result = await db.query(
+    "SELECT id, description, hook_text, script_text, cta_text FROM reels"
+  );
+  let updated = 0;
+  for (const reel of result.rows) {
+    if (reel.hook_text?.trim() && reel.script_text?.trim() && reel.cta_text?.trim()) continue;
+    const segments = fallbackSegments(reel.description || "");
+    await db.query(
+      `UPDATE reels SET
+         hook_text = $1, script_text = $2, cta_text = $3, updated_at = NOW()
+       WHERE id = $4`,
+      [reel.hook_text?.trim() || segments.hook, reel.script_text?.trim() || segments.script,
+        reel.cta_text?.trim() || segments.cta, reel.id]
+    );
+    updated += 1;
+  }
+  if (updated) console.log(`Reel segments backfilled: ${updated}`);
+  return updated;
 }
 
 export async function startApifySync(db, competitor, options = {}) {

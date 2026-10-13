@@ -29,6 +29,16 @@ services:
         value: "293601280"
       - key: DATABASE_MEDIA_VIDEO_MAX_BYTES
         value: "52428800"
+      - key: SYNC_COOLDOWN_MINUTES
+        value: "10"
+      - key: SYNC_HOURLY_LIMIT
+        value: "3"
+      - key: SYNC_DAILY_LIMIT
+        value: "10"
+      - key: COMPETITOR_LIMIT
+        value: "10"
+      - key: SCRIPT_LIMIT
+        value: "200"
       - key: R2_ACCOUNT_ID
         sync: false
       - key: R2_ACCESS_KEY_ID
