@@ -3,11 +3,58 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Reels Finder — пространство для поиска идей и создания сценариев Reels." />
     <title>Reels Finder</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main>
-      <h1>Reels Finder</h1>
-    </main>
+    <svg class="svg-sprite" aria-hidden="true">
+      <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5v8a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></symbol>
+      <symbol id="i-users" viewBox="0 0 24 24"><path d="M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm6.5-1a3 3 0 1 0 0-6M2 20v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2m1-7a5 5 0 0 1 5 5v2"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 13h6m-6 4h6"/></symbol>
+      <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16 16 5 5"/></symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9m4 0h3M4 17h3m4 0h9M13 4v6M7 14v6"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 2 1.5 5.5L19 9l-5.5 1.5L12 16l-1.5-5.5L5 9l5.5-1.5zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M18.5 9A7 7 0 0 0 6 7l-2 5m2 3a7 7 0 0 0 12.5 2l1.5-5"/></symbol>
+      <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6m0-6-9 9M19 14v6H4V5h6"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4H4v12h4"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="m9 6 9 6-9 6z"/></symbol>
+      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    </svg>
+
+    <div class="shell">
+      <aside class="sidebar">
+        <button class="brand" data-view="home" aria-label="На главную">
+          <span class="brand-mark"><svg><use href="#i-play" /></svg></span>
+          <span><strong>Reels Finder</strong><small>AI Reels Producer</small></span>
+        </button>
+
+        <nav class="main-nav" aria-label="Основная навигация">
+          <button class="nav-item active" data-view="home"><svg><use href="#i-home" /></svg><span>Главная</span></button>
+          <button class="nav-item" data-view="competitors"><svg><use href="#i-users" /></svg><span>Конкуренты</span></button>
+          <button class="nav-item" data-view="scripts"><svg><use href="#i-file" /></svg><span>Мои сценарии</span></button>
+          <button class="nav-item" data-view="favorites"><svg><use href="#i-star" /></svg><span>Избранное</span></button>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <div class="usage-card">
+            <span>Использовано</span>
+            <strong>42 из 200 рилс в этом месяце</strong>
+            <div class="progress"><i></i></div>
+          </div>
+          <button class="profile"><span class="avatar">ИИ</span><span><strong>Игорь</strong><small>Pro план</small></span><b>›</b></button>
+        </div>
+      </aside>
+
+      <main id="app" class="content" tabindex="-1"></main>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
   </body>
 </html>
