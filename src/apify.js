@@ -261,14 +261,18 @@ export async function backfillMissingSegments(db) {
   );
   let updated = 0;
   for (const reel of result.rows) {
-    if (reel.hook_text?.trim() && reel.script_text?.trim() && reel.cta_text?.trim()) continue;
     const segments = fallbackSegments(reel.description || "");
+    const existingHook = reel.hook_text?.trim() || "";
+    const existingScript = reel.script_text?.trim() || "";
+    const existingCta = reel.cta_text?.trim() || "";
+    const legacyScript = existingScript && existingScript === String(reel.description || "").trim();
+    if (existingHook && existingScript && existingCta && !legacyScript) continue;
     await db.query(
       `UPDATE reels SET
          hook_text = $1, script_text = $2, cta_text = $3, updated_at = NOW()
        WHERE id = $4`,
-      [reel.hook_text?.trim() || segments.hook, reel.script_text?.trim() || segments.script,
-        reel.cta_text?.trim() || segments.cta, reel.id]
+      [existingHook || segments.hook, legacyScript ? segments.script : existingScript || segments.script,
+        existingCta || segments.cta, reel.id]
     );
     updated += 1;
   }

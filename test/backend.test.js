@@ -111,6 +111,10 @@ test("REST API reads seeded reels and persists a script", async () => {
   assert.equal(segments.rows[0].hook_text, "Start here.");
   assert.equal(segments.rows[0].script_text, "Useful middle.");
   assert.equal(segments.rows[0].cta_text, "Save this post.");
+  await pool.query("UPDATE reels SET script_text = description WHERE id = $1", [reel.rows[0].id]);
+  assert.equal(await backfillMissingSegments(pool), 1);
+  const refined = await pool.query("SELECT script_text FROM reels WHERE id = $1", [reel.rows[0].id]);
+  assert.equal(refined.rows[0].script_text, "Useful middle.");
   await pool.query(
     "INSERT INTO scripts(reel_id, title) VALUES ($1, 'Existing script')",
     [reel.rows[0].id]
