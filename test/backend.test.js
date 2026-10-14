@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { newDb } from "pg-mem";
-import { backfillMissingSegments, cacheReelMedia, normalizeApifyReel } from "../src/apify.js";
+import { backfillMissingSegments, cacheReelMedia, normalizeApifyReel, recoverInterruptedSyncRuns } from "../src/apify.js";
 import { createApp } from "../src/app.js";
+import { createBackupSnapshot, restoreBackupSnapshot, restoreMediaAsset } from "../src/backup.js";
 
 function addCurrentReelColumns(memory) {
   memory.public.none(`
@@ -11,10 +12,14 @@ function addCurrentReelColumns(memory) {
     ALTER TABLE reels ADD COLUMN media_status TEXT NOT NULL DEFAULT 'missing';
     ALTER TABLE reels ADD COLUMN hashtags JSONB NOT NULL DEFAULT '[]';
     ALTER TABLE reels ADD COLUMN mentions JSONB NOT NULL DEFAULT '[]';
+    ALTER TABLE reels ADD COLUMN audio JSONB NOT NULL DEFAULT '{}';
     ALTER TABLE reels ADD COLUMN transcript TEXT NOT NULL DEFAULT '';
     ALTER TABLE reels ADD COLUMN owner_username TEXT NOT NULL DEFAULT '';
     ALTER TABLE reels ADD COLUMN owner_full_name TEXT NOT NULL DEFAULT '';
     ALTER TABLE reels ADD COLUMN last_synced_at TIMESTAMPTZ;
+    ALTER TABLE sync_runs ADD COLUMN provider_dataset_id TEXT;
+    ALTER TABLE sync_runs ADD COLUMN skipped_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE sync_runs ADD COLUMN media_stored_count INTEGER NOT NULL DEFAULT 0;
     CREATE TABLE media_assets (
       id BIGSERIAL PRIMARY KEY,
       reel_id BIGINT NOT NULL REFERENCES reels(id) ON DELETE CASCADE,
@@ -29,6 +34,16 @@ function addCurrentReelColumns(memory) {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (reel_id, kind)
+    );
+    CREATE TABLE reel_metric_snapshots (
+      id BIGSERIAL PRIMARY KEY,
+      reel_id BIGINT NOT NULL REFERENCES reels(id) ON DELETE CASCADE,
+      views_count BIGINT NOT NULL DEFAULT 0,
+      play_count BIGINT NOT NULL DEFAULT 0,
+      likes_count BIGINT NOT NULL DEFAULT 0,
+      comments_count BIGINT NOT NULL DEFAULT 0,
+      shares_count BIGINT NOT NULL DEFAULT 0,
+      captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 }
@@ -85,6 +100,15 @@ test("Apify output is normalized into the SQL reel model", () => {
     videoPlayCount: 9876
   }, 42);
   assert.equal(fallback.viewsCount, 9876);
+
+  const short = normalizeApifyReel({
+    id: "short",
+    url: "https://instagram.com/reel/short",
+    displayUrl: "https://cdn.example/preview.jpg",
+    caption: "Only one sentence."
+  }, 42);
+  assert.notEqual(short.scriptText, short.hookText);
+  assert.match(short.scriptText, /не найден/i);
 });
 
 test("REST API reads seeded reels and persists a script", async () => {
@@ -138,6 +162,12 @@ test("REST API reads seeded reels and persists a script", async () => {
     const reels = (await reelsResponse.json()).data;
     assert.equal(reelsResponse.status, 200);
     assert.equal(reels.length, 1);
+    assert.equal(reelsResponse.headers.get("x-content-type-options"), "nosniff");
+    assert.match(reelsResponse.headers.get("content-security-policy"), /frame-ancestors 'none'/);
+
+    const backupResponse = await fetch(`${base}/api/admin/backup`);
+    assert.equal(backupResponse.status, 200);
+    assert.equal((await backupResponse.json()).data.reels.length, 1);
 
     const csvResponse = await fetch(`${base}/api/export/reels.csv`);
     assert.equal(csvResponse.status, 200);
@@ -340,4 +370,58 @@ test("rotating database cache keeps the old video when a new source has expired"
     globalThis.fetch = previousFetch;
     await pool.end();
   }
+});
+
+test("backup restores relational data and media into a fresh database state", async () => {
+  const memory = newDb({ noAstCoverageCheck: true });
+  const schema = await readFile(new URL("../db/migrations/001_schema.sql", import.meta.url), "utf8");
+  memory.public.none(schema);
+  addCurrentReelColumns(memory);
+  const adapter = memory.adapters.createPg();
+  const pool = new adapter.Pool();
+  const competitor = await pool.query(
+    "INSERT INTO competitors(instagram_handle, profile_url) VALUES ('@backup', 'https://instagram.com/backup') RETURNING id"
+  );
+  const reel = await pool.query(
+    `INSERT INTO reels(competitor_id, platform_reel_id, source_url, video_url, thumbnail_url, title, media_status)
+     VALUES ($1, 'backup-reel', 'https://instagram.com/reel/backup', 'https://cdn.example/video.mp4',
+       'https://cdn.example/thumb.jpg', 'Backup reel', 'external') RETURNING id`,
+    [competitor.rows[0].id]
+  );
+  await pool.query("INSERT INTO scripts(reel_id, title) VALUES ($1, 'Backup script')", [reel.rows[0].id]);
+  await pool.query("INSERT INTO sync_runs(competitor_id, status) VALUES ($1, 'running')", [competitor.rows[0].id]);
+  const snapshot = await createBackupSnapshot(pool);
+  assert.equal(snapshot.data.reels.length, 1);
+  const restored = await restoreBackupSnapshot(pool, snapshot);
+  assert.equal(restored.reels, 1);
+  assert.equal(restored.scripts, 1);
+  const newReelId = restored.reelIds[String(reel.rows[0].id)];
+  const interrupted = await pool.query("SELECT status FROM sync_runs");
+  assert.equal(interrupted.rows[0].status, "failed");
+  await restoreMediaAsset(pool, newReelId, "video", Buffer.from("video-bytes"), {
+    contentType: "video/mp4",
+    sourceUrl: "https://cdn.example/video.mp4"
+  });
+  const restoredReel = await pool.query("SELECT media_status, video_url FROM reels WHERE id = $1", [newReelId]);
+  assert.equal(restoredReel.rows[0].media_status, "stored");
+  assert.equal(restoredReel.rows[0].video_url, `/api/media/${newReelId}/video`);
+  await pool.end();
+});
+
+test("interrupted sync runs are released on startup", async () => {
+  const memory = newDb({ noAstCoverageCheck: true });
+  const schema = await readFile(new URL("../db/migrations/001_schema.sql", import.meta.url), "utf8");
+  memory.public.none(schema);
+  addCurrentReelColumns(memory);
+  const adapter = memory.adapters.createPg();
+  const pool = new adapter.Pool();
+  const competitor = await pool.query(
+    "INSERT INTO competitors(instagram_handle, profile_url) VALUES ('@recover', 'https://instagram.com/recover') RETURNING id"
+  );
+  await pool.query("INSERT INTO sync_runs(competitor_id, status) VALUES ($1, 'queued')", [competitor.rows[0].id]);
+  assert.equal(await recoverInterruptedSyncRuns(pool), 1);
+  const run = await pool.query("SELECT status, finished_at FROM sync_runs");
+  assert.equal(run.rows[0].status, "failed");
+  assert.ok(run.rows[0].finished_at);
+  await pool.end();
 });

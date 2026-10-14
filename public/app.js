@@ -63,18 +63,22 @@ function updateAccountButton() {
   const name = document.querySelector("#account-name");
   const status = document.querySelector("#account-status");
   const avatar = document.querySelector("#account-avatar");
+  const mobileLabel = document.querySelector("#mobile-account-label");
   if (!authState.enabled) {
     name.textContent = "Локальный режим";
     status.textContent = "Защита включится на Render";
     avatar.textContent = "RF";
+    mobileLabel.textContent = "Локально";
   } else if (authState.authenticated) {
     name.textContent = "Владелец";
     status.textContent = "Нажмите, чтобы выйти";
     avatar.textContent = "ВЛ";
+    mobileLabel.textContent = "Выйти";
   } else {
     name.textContent = "Гость";
     status.textContent = "Войти для изменений";
     avatar.textContent = "Г";
+    mobileLabel.textContent = "Войти";
   }
 }
 
@@ -102,6 +106,23 @@ async function refreshSidebarStats() {
   } catch {
     document.querySelector("#usage-count").textContent = "Статистика недоступна";
   }
+}
+
+async function downloadBackupMetadata() {
+  const response = await fetch("/api/admin/backup", { credentials: "same-origin" });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    if (response.status === 401) showLogin();
+    throw new Error(payload.error || "Не удалось создать резервную копию");
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition") || "";
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] || "reels-finder-backup.json";
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(link.href);
 }
 
 function showToast(message) {
@@ -153,8 +174,8 @@ function reelCard(reel) {
 }
 
 async function renderHome(onlyFavorites = false) {
-  const query = new URLSearchParams({ sort: sortMode });
-  const favoriteQuery = new URLSearchParams({ sort: sortMode, favorite: "true" });
+  const query = new URLSearchParams({ sort: sortMode, limit: "200" });
+  const favoriteQuery = new URLSearchParams({ sort: sortMode, favorite: "true", limit: "200" });
   const [allReels, favoriteReels, scripts] = await Promise.all([
     api(`/api/reels?${query}`), api(`/api/reels?${favoriteQuery}`), api("/api/scripts")
   ]);
@@ -215,7 +236,7 @@ function bindReelActions() {
 }
 
 async function renderCompetitors() {
-  const [competitors, reels] = await Promise.all([api("/api/competitors"), api("/api/reels?sort=latest")]);
+  const [competitors, reels] = await Promise.all([api("/api/competitors"), api("/api/reels?sort=latest&limit=200")]);
   const active = new Set(["queued", "running", "importing"]);
   const statusInfo = (competitor) => {
     const map = {
@@ -238,7 +259,7 @@ async function renderCompetitors() {
   const mediaStatus = (status) => ({ stored: ["Сохранено", "success"], external: ["Временная ссылка", "info"], storing: ["Сохраняется", "active"], failed: ["Ошибка видео", "error"], missing: ["Только оригинал", "warning"] })[status] || ["Неизвестно", "muted"];
   const exportUrl = `/api/export/reels.csv${selectedCompetitor ? `?competitor_id=${selectedCompetitor.id}` : ""}`;
   app.innerHTML = `<section class="page">
-    ${pageHead("Конкуренты", "Добавляйте Instagram аккаунты и собирайте их последние рилс", `<a class="button" href="${exportUrl}" download>↓ Экспорт CSV</a>`)}
+    ${pageHead("Конкуренты", "Добавляйте Instagram аккаунты и собирайте их последние рилс", `<div class="head-actions"><button class="button" id="download-backup">Резервная копия</button><a class="button" href="${exportUrl}" download>↓ Экспорт CSV</a></div>`)}
     <div class="overview-grid">
       <article><span>Конкуренты</span><strong>${competitors.length}</strong><small>из 10 на тестовом стенде</small></article>
       <article><span>Рилсы в базе</span><strong>${reels.length}</strong><small>${storedTotal} сохранено · ${temporaryTotal} временных</small></article>
@@ -267,6 +288,17 @@ async function renderCompetitors() {
     </tbody></table></div>
   </section>`;
   bindPageEvents();
+  document.querySelector("#download-backup").addEventListener("click", async (event) => {
+    event.currentTarget.disabled = true;
+    try {
+      await downloadBackupMetadata();
+      showToast("Копия данных сохранена. Полную копию с видео создаёт npm run backup");
+    } catch (error) {
+      showToast(error.message);
+    } finally {
+      event.currentTarget.disabled = false;
+    }
+  });
   document.querySelector("#competitor-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const submit = event.currentTarget.querySelector("button");
@@ -319,7 +351,7 @@ function segmentsMarkup(reel) {
   if (originalMode) return `<div class="segment"><span class="segment-number">↗</span><div class="segment-head"><strong>Описание оригинала</strong></div><div class="segment-body">${nl2br(reel.description || "У оригинала нет описания")}</div></div>`;
   const segments = [
     ["Hook (Первые 3 секунды)", "hook_text", reel.hook_text, "~ 0:03"],
-    ["Основной сценарий", "script_text", reel.script_text, `~ 0:${String(Math.max(0, reel.duration_seconds - 7)).padStart(2, "0")}`],
+    ["Основной сценарий", "script_text", reel.script_text, `~ ${duration(Math.max(0, reel.duration_seconds - 7))}`],
     ["Call to Action", "cta_text", reel.cta_text, "~ 0:04"]
   ];
   return segments.map(([title, field, value, time], index) => `<article class="segment"><span class="segment-number">${index + 1}</span><div class="segment-head"><strong>${title}</strong><span>${icon("clock")} ${time}</span></div>${editMode ? `<textarea class="segment-editor" name="${field}">${escapeHtml(value)}</textarea>` : `<div class="segment-body">${nl2br(value)}</div>`}</article>`).join("");
@@ -494,13 +526,19 @@ document.querySelector(".login-close").addEventListener("click", hideLogin);
 document.querySelector("#login-overlay").addEventListener("click", (event) => {
   if (event.target === event.currentTarget) hideLogin();
 });
-document.querySelector("#account-button").addEventListener("click", async () => {
+async function toggleAccount() {
   if (!authState.enabled) return showToast("Локально защита отключена");
   if (!authState.authenticated) return showLogin();
   await api("/api/auth/logout", { method: "POST", body: "{}" });
   authState = { ...authState, authenticated: false };
   updateAccountButton();
   showToast("Вы вышли из режима владельца");
+}
+
+document.querySelector("#account-button").addEventListener("click", toggleAccount);
+document.querySelector("#mobile-account-button").addEventListener("click", toggleAccount);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !document.querySelector("#login-overlay").hidden) hideLogin();
 });
 
 async function initialize() {

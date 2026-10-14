@@ -23,7 +23,8 @@ function fallbackSegments(description) {
   const cta = [...parts].reverse().find((part) => ctaPattern.test(part)) ||
     "CTA в исходном описании не найден. Добавьте свой призыв при редактировании.";
   const scriptParts = parts.filter((part, index) => index !== 0 && part !== cta);
-  const script = scriptParts.join("\n") || description || hook;
+  const script = scriptParts.join("\n") ||
+    "Основной текст не найден в подписи. Добавьте содержание ролика при редактировании.";
   return { hook, script, cta };
 }
 
@@ -362,6 +363,18 @@ export async function backfillMissingSegments(db) {
   }
   if (updated) console.log(`Reel segments backfilled: ${updated}`);
   return updated;
+}
+
+export async function recoverInterruptedSyncRuns(db) {
+  const result = await db.query(
+    `UPDATE sync_runs SET status = 'failed',
+       error_message = 'Импорт был прерван перезапуском сервера. Запустите обновление повторно.',
+       finished_at = NOW()
+     WHERE status IN ('queued', 'running', 'importing')
+     RETURNING id`
+  );
+  if (result.rowCount) console.log(`Recovered ${result.rowCount} interrupted sync run(s)`);
+  return result.rowCount;
 }
 
 export async function startApifySync(db, competitor, options = {}) {

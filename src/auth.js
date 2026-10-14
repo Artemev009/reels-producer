@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 const cookieName = "reels_admin";
 
@@ -25,15 +25,35 @@ export function createAdminAuth(env = process.env) {
   const password = String(env.ADMIN_PASSWORD || "");
   const enabled = Boolean(password);
   const sessionSecret = String(env.ADMIN_SESSION_SECRET || password);
-  const expectedSession = enabled
-    ? createHmac("sha256", sessionSecret).update("reels-finder-admin-v1").digest("base64url")
-    : "";
+  const sessionSeconds = 12 * 60 * 60;
   const secure = String(env.AUTH_COOKIE_SECURE || "true").toLowerCase() !== "false";
   const attempts = new Map();
 
+  function signature(payload) {
+    return createHmac("sha256", sessionSecret).update(payload).digest("base64url");
+  }
+
+  function createSession() {
+    const payload = Buffer.from(JSON.stringify({
+      expiresAt: Date.now() + sessionSeconds * 1000,
+      nonce: randomBytes(16).toString("base64url")
+    })).toString("base64url");
+    return `${payload}.${signature(payload)}`;
+  }
+
   function authenticated(request) {
     if (!enabled) return true;
-    return safeEqual(cookies(request.headers.cookie)[cookieName], expectedSession);
+    const token = cookies(request.headers.cookie)[cookieName] || "";
+    const separator = token.lastIndexOf(".");
+    if (separator < 1) return false;
+    const payload = token.slice(0, separator);
+    if (!safeEqual(token.slice(separator + 1), signature(payload))) return false;
+    try {
+      const session = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+      return Number(session.expiresAt) > Date.now();
+    } catch {
+      return false;
+    }
   }
 
   function status(request, response) {
@@ -52,7 +72,7 @@ export function createAdminAuth(env = process.env) {
       return response.status(401).json({ error: "Неверный пароль" });
     }
     attempts.delete(key);
-    const flags = [`${cookieName}=${encodeURIComponent(expectedSession)}`, "Path=/", "HttpOnly", "SameSite=Strict", "Max-Age=43200"];
+    const flags = [`${cookieName}=${encodeURIComponent(createSession())}`, "Path=/", "HttpOnly", "SameSite=Strict", `Max-Age=${sessionSeconds}`];
     if (secure) flags.push("Secure");
     response.set("Set-Cookie", flags.join("; "));
     response.status(204).end();

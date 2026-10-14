@@ -10,12 +10,39 @@ memory.public.none(`
   ALTER TABLE reels ADD COLUMN media_status TEXT NOT NULL DEFAULT 'missing';
   ALTER TABLE reels ADD COLUMN hashtags JSONB NOT NULL DEFAULT '[]';
   ALTER TABLE reels ADD COLUMN mentions JSONB NOT NULL DEFAULT '[]';
+  ALTER TABLE reels ADD COLUMN audio JSONB NOT NULL DEFAULT '{}';
   ALTER TABLE reels ADD COLUMN transcript TEXT NOT NULL DEFAULT '';
   ALTER TABLE reels ADD COLUMN owner_username TEXT NOT NULL DEFAULT '';
   ALTER TABLE reels ADD COLUMN owner_full_name TEXT NOT NULL DEFAULT '';
   ALTER TABLE reels ADD COLUMN last_synced_at TIMESTAMPTZ;
   ALTER TABLE sync_runs ADD COLUMN skipped_count INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE sync_runs ADD COLUMN media_stored_count INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE sync_runs ADD COLUMN provider_dataset_id TEXT;
+  CREATE TABLE media_assets (
+    id BIGSERIAL PRIMARY KEY,
+    reel_id BIGINT NOT NULL REFERENCES reels(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    storage_provider TEXT NOT NULL,
+    storage_key TEXT,
+    public_url TEXT NOT NULL,
+    source_url TEXT,
+    content_type TEXT,
+    size_bytes BIGINT,
+    content BYTEA,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (reel_id, kind)
+  );
+  CREATE TABLE reel_metric_snapshots (
+    id BIGSERIAL PRIMARY KEY,
+    reel_id BIGINT NOT NULL REFERENCES reels(id) ON DELETE CASCADE,
+    views_count BIGINT NOT NULL DEFAULT 0,
+    play_count BIGINT NOT NULL DEFAULT 0,
+    likes_count BIGINT NOT NULL DEFAULT 0,
+    comments_count BIGINT NOT NULL DEFAULT 0,
+    shares_count BIGINT NOT NULL DEFAULT 0,
+    captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
 `);
 const adapter = memory.adapters.createPg();
 const db = new adapter.Pool();

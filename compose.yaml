@@ -1,0 +1,39 @@
+services:
+  database:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: reels_finder
+      POSTGRES_USER: reels_finder
+      POSTGRES_PASSWORD: local_reels_password
+    volumes:
+      - reels_finder_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reels_finder -d reels_finder"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://reels_finder:local_reels_password@database:5432/reels_finder
+      DB_SSL: "false"
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-local-owner}
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:-local-demo-session-secret-change-me}
+      AUTH_COOKIE_SECURE: "false"
+      APIFY_API_TOKEN: ${APIFY_API_TOKEN:-}
+      DATABASE_MEDIA_CACHE: "true"
+      DATABASE_MEDIA_REELS_LIMIT: "200"
+      DATABASE_MEDIA_TOTAL_BYTES: "2147483648"
+      DATABASE_MEDIA_VIDEO_MAX_BYTES: "209715200"
+      RESTORE_MEDIA_MAX_BYTES: "209715200"
+    ports:
+      - "127.0.0.1:3000:8080"
+
+volumes:
+  reels_finder_data:

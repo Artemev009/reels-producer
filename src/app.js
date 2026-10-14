@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { cacheReelMedia, startApifySync } from "./apify.js";
 import { createAdminAuth } from "./auth.js";
+import { createBackupSnapshot, restoreBackupSnapshot, restoreMediaAsset } from "./backup.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const publicDirectory = path.join(root, "public");
@@ -116,6 +117,16 @@ export function createApp({ db, apifyImporter = startApifySync, mediaCacher = ca
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
+  app.use((_request, response, next) => {
+    response.set({
+      "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' https: data:; media-src 'self' https: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+      "Referrer-Policy": "strict-origin-when-cross-origin",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    });
+    next();
+  });
   app.use(express.json({ limit: "256kb" }));
   const auth = createAdminAuth(env);
 
@@ -130,10 +141,42 @@ export function createApp({ db, apifyImporter = startApifySync, mediaCacher = ca
   app.get("/health", async (_request, response) => {
     try {
       await db.query("SELECT 1");
-      response.json({ status: "ok", database: "connected" });
+      response.json({
+        status: "ok",
+        database: "connected",
+        apify: env.APIFY_API_TOKEN ? "configured" : "missing",
+        media_storage: env.R2_ACCOUNT_ID ? "object-storage" : "postgres-demo-cache"
+      });
     } catch {
       response.status(503).json({ status: "error", database: "unavailable" });
     }
+  });
+
+  app.get("/api/admin/backup", auth.requireMutation, async (_request, response) => {
+    const backup = await createBackupSnapshot(db);
+    const date = new Date().toISOString().slice(0, 10);
+    response.set({
+      "Cache-Control": "no-store",
+      "Content-Disposition": `attachment; filename="reels-finder-backup-${date}.json"`
+    });
+    response.json(backup);
+  });
+
+  app.post("/api/admin/restore", express.json({ type: "application/vnd.reels-finder.backup+json", limit: "20mb" }), async (request, response) => {
+    const result = await restoreBackupSnapshot(db, request.body);
+    response.json({ data: result });
+  });
+
+  app.post("/api/admin/media/:reelId/:kind", express.raw({ type: () => true, limit: "150mb" }), async (request, response) => {
+    const maxBytes = positiveInteger(env.RESTORE_MEDIA_MAX_BYTES, 120 * 1024 * 1024);
+    if (!Buffer.isBuffer(request.body) || request.body.length > maxBytes) {
+      return response.status(413).json({ error: "Медиафайл превышает лимит восстановления" });
+    }
+    const result = await restoreMediaAsset(db, parseId(request.params.reelId, "reelId"), request.params.kind, request.body, {
+      contentType: request.headers["content-type"],
+      sourceUrl: optionalText(request.headers["x-source-url"], 4000)
+    });
+    response.status(201).json({ data: result });
   });
 
   app.get("/api/media/:reelId/:kind", async (request, response) => {
@@ -311,7 +354,11 @@ export function createApp({ db, apifyImporter = startApifySync, mediaCacher = ca
        ${where} ORDER BY r.published_at DESC NULLS LAST, r.id DESC`,
       values
     );
-    const quote = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+    const quote = (value) => {
+      const text = String(value ?? "");
+      const safe = /^[\t\r ]*[=+\-@]/.test(text) ? `'${text}` : text;
+      return `"${safe.replaceAll('"', '""')}"`;
+    };
     const header = ["id", "account", "title", "source_url", "duration_seconds", "views", "likes", "comments", "shares", "media_status", "hook", "script", "cta", "published_at"];
     const csv = [header, ...result.rows.map((row) => [row.id, row.instagram_handle, row.title, row.source_url,
       row.duration_seconds, row.views_count, row.likes_count, row.comments_count, row.shares_count,
