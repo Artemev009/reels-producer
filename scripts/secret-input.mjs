@@ -21,6 +21,7 @@ export async function readSecret(label) {
     const finish = (error) => {
       process.stdin.off("data", onData);
       process.stdin.setRawMode(false);
+      process.stdin.pause();
       process.stdout.write("\n");
       if (error) reject(error);
       else resolve(value.trim());
