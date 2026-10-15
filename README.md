@@ -14,6 +14,7 @@ Browser UI → Express REST API → PostgreSQL
 - `public/` — интерфейс без сборщика;
 - `src/app.js` — REST API;
 - `src/apify.js` — асинхронная интеграция с Apify и нормализация Dataset;
+- `src/niche.js` — поиск популярных Reels по нише, авторы и сохранение результатов;
 - `src/storage.js` — S3-совместимое хранение медиа в Cloudflare R2;
 - `db/migrations/` — SQL-схема и начальные демонстрационные данные;
 - `render.yaml` — Docker web service и связанный Render Postgres.
@@ -62,6 +63,7 @@ npm run restore -- "backups/<дата>" http://127.0.0.1:3000
 
 - `GET/POST /api/competitors`
 - `POST /api/competitors/:id/sync`
+- `POST /api/niche-searches` — запускает поиск по теме; результаты доступны через `GET /api/niche-searches/:id/results`;
 - `GET /api/sync-runs/:id`
 - `GET /api/reels`
 - `GET /api/export/reels.csv`
@@ -87,6 +89,8 @@ npm run restore -- "backups/<дата>" http://127.0.0.1:3000
 - `APIFY_ACTOR_ID` — идентификатор Actor. По умолчанию используется официальный `apify/instagram-reel-scraper`.
 
 После этого кнопка синхронизации создаёт фоновую задачу, запускает Actor, получает до 20 записей из Dataset и делает UPSERT в таблицу `reels`. Интерфейс показывает состояния `queued`, `running`, `importing`, `succeeded`, `partial` и `failed`.
+
+Раздел «По нише» запускает официальный `apify/instagram-search-scraper` в режиме популярных Reels, сохраняет видео и их авторов в PostgreSQL и показывает простую оценку совпадения по тексту/хэштегам. Результаты поиска Instagram ограничены самим источником, поэтому это первичный подбор, а не полный рейтинг лучших авторов. По умолчанию разрешены 3 запуска в сутки по 10 роликов; ограничения меняются через `NICHE_DAILY_LIMIT` и `NICHE_RESULTS_LIMIT`. На странице Actor указана тарификация около $2.70 за 1,000 результатов на бесплатном плане; десять результатов — небольшая доля бесплатного кредита, но после исчерпания кредита Apify поиск перестанет запускаться без пополнения. Фоновый поиск требует входа владельца.
 
 Чтобы публичный тестовый стенд не расходовал бесплатные лимиты Apify из-за случайных повторов, сервер разрешает не более 3 импортов в час, 10 в сутки и выдерживает паузу 10 минут для одного аккаунта. Также стенд ограничен 10 конкурентами и 200 сценариями. Значения можно менять через переменные окружения `SYNC_HOURLY_LIMIT`, `SYNC_DAILY_LIMIT`, `SYNC_COOLDOWN_MINUTES`, `COMPETITOR_LIMIT` и `SCRIPT_LIMIT`.
 

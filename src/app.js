@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { cacheReelMedia, startApifySync } from "./apify.js";
 import { createAdminAuth } from "./auth.js";
 import { createBackupSnapshot, restoreBackupSnapshot, restoreMediaAsset } from "./backup.js";
+import { startNicheSearch } from "./niche.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const publicDirectory = path.join(root, "public");
@@ -113,7 +114,7 @@ function byteRange(header, size) {
   return { start, end: Math.min(end, size - 1) };
 }
 
-export function createApp({ db, apifyImporter = startApifySync, mediaCacher = cacheReelMedia, env = process.env }) {
+export function createApp({ db, apifyImporter = startApifySync, mediaCacher = cacheReelMedia, nicheSearcher = startNicheSearch, env = process.env }) {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
@@ -306,6 +307,35 @@ export function createApp({ db, apifyImporter = startApifySync, mediaCacher = ca
     await enforceSyncBudget(db, id, env);
     const syncRun = await apifyImporter(db, result.rows[0]);
     response.status(202).json({ data: syncRun });
+  });
+
+  app.post("/api/niche-searches", async (request, response) => {
+    if (!env.APIFY_API_TOKEN) return response.status(503).json({ error: "Apify не подключён" });
+    const niche = requiredText(request.body.niche, "Ниша", 100);
+    const budget = positiveInteger(env.NICHE_DAILY_LIMIT, 3);
+    const used = await db.query("SELECT COUNT(*)::INTEGER AS count FROM niche_searches WHERE started_at >= $1", [new Date(Date.now() - 24 * 60 * 60 * 1000)]);
+    if (Number(used.rows[0].count) >= budget) throw limitError(`Бесплатный лимит: не более ${budget} поисков по нише в сутки`);
+    const search = await nicheSearcher(db, niche, { env });
+    response.status(202).json({ data: search });
+  });
+
+  app.get("/api/niche-searches/:id", async (request, response) => {
+    const result = await db.query("SELECT * FROM niche_searches WHERE id = $1", [parseId(request.params.id)]);
+    if (!result.rowCount) return response.status(404).json({ error: "Поиск не найден" });
+    response.json({ data: result.rows[0] });
+  });
+
+  app.get("/api/niche-searches/:id/results", async (request, response) => {
+    const id = parseId(request.params.id);
+    const [search, results] = await Promise.all([
+      db.query("SELECT * FROM niche_searches WHERE id = $1", [id]),
+      db.query(`SELECT ${reelFields}, nsr.relevance_score, nsr.matched_terms
+        FROM niche_search_reels nsr JOIN reels r ON r.id = nsr.reel_id
+        LEFT JOIN competitors c ON c.id = r.competitor_id
+        WHERE nsr.search_id = $1 ORDER BY nsr.relevance_score DESC, r.views_count DESC LIMIT 50`, [id])
+    ]);
+    if (!search.rowCount) return response.status(404).json({ error: "Поиск не найден" });
+    response.json({ data: { search: search.rows[0], reels: results.rows } });
   });
 
   app.get("/api/sync-runs/:id", async (request, response) => {

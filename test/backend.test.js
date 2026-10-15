@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { newDb } from "pg-mem";
 import { backfillMissingSegments, cacheReelMedia, normalizeApifyReel, recoverInterruptedSyncRuns } from "../src/apify.js";
+import { runNicheSearch } from "../src/niche.js";
 import { createApp } from "../src/app.js";
 import { createBackupSnapshot, restoreBackupSnapshot, restoreMediaAsset } from "../src/backup.js";
 
@@ -111,11 +112,47 @@ test("Apify output is normalized into the SQL reel model", () => {
   assert.match(short.scriptText, /не найден/i);
 });
 
+test("niche discovery imports matching reels and creators without a live Apify run", async () => {
+  const memory = newDb({ noAstCoverageCheck: true });
+  const schema = await readFile(new URL("../db/migrations/001_schema.sql", import.meta.url), "utf8");
+  memory.public.none(schema);
+  addCurrentReelColumns(memory);
+  memory.public.none(await readFile(new URL("../db/migrations/005_niche_discovery.sql", import.meta.url), "utf8"));
+  const pool = new (memory.adapters.createPg().Pool)();
+  const search = await pool.query("INSERT INTO niche_searches(niche, search_term) VALUES ($1,$1) RETURNING id", ["обучение нейросетям"]);
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (options?.method === "POST") return Response.json({ data: { id: "run-1", status: "SUCCEEDED", defaultDatasetId: "dataset-1" } });
+    if (String(url).includes("actor-runs")) return Response.json({ data: { id: "run-1", status: "SUCCEEDED", defaultDatasetId: "dataset-1" } });
+    return Response.json([{
+      id: "niche-reel-1", shortCode: "niche-reel-1", type: "Video", productType: "clips",
+      url: "https://www.instagram.com/reel/niche-reel-1/", ownerUsername: "ai.creator",
+      ownerFullName: "AI Creator", displayUrl: "https://cdn.example/cover.jpg",
+      videoUrl: "https://cdn.example/video.mp4", caption: "Обучение нейросетям: простой разбор",
+      hashtags: ["нейросети"], videoViewCount: 5000, likesCount: 120, commentsCount: 8
+    }]);
+  };
+  try {
+    await runNicheSearch(pool, search.rows[0].id, { env: { APIFY_API_TOKEN: "fake-token" } });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  const status = await pool.query("SELECT status, imported_count FROM niche_searches WHERE id = $1", [search.rows[0].id]);
+  const imported = await pool.query("SELECT r.title, c.instagram_handle, nsr.relevance_score, nsr.matched_terms FROM niche_search_reels nsr JOIN reels r ON r.id = nsr.reel_id JOIN competitors c ON c.id = r.competitor_id");
+  assert.equal(status.rows[0].status, "succeeded");
+  assert.equal(Number(status.rows[0].imported_count), 1);
+  assert.equal(imported.rows[0].instagram_handle, "@ai.creator");
+  assert.equal(imported.rows[0].relevance_score, 100);
+  assert.deepEqual(imported.rows[0].matched_terms, ["обучение", "нейросетям"]);
+});
+
 test("REST API reads seeded reels and persists a script", async () => {
   const memory = newDb({ noAstCoverageCheck: true });
   const schema = await readFile(new URL("../db/migrations/001_schema.sql", import.meta.url), "utf8");
   memory.public.none(schema);
   addCurrentReelColumns(memory);
+  const nicheSchema = await readFile(new URL("../db/migrations/005_niche_discovery.sql", import.meta.url), "utf8");
+  memory.public.none(nicheSchema);
   const adapter = memory.adapters.createPg();
   const pool = new adapter.Pool();
   const competitor = await pool.query(
@@ -145,8 +182,11 @@ test("REST API reads seeded reels and persists a script", async () => {
   );
   const server = createApp({
     db: pool,
-    env: { SCRIPT_LIMIT: "2", SYNC_COOLDOWN_MINUTES: "10", SYNC_HOURLY_LIMIT: "3", SYNC_DAILY_LIMIT: "10" },
+    env: { APIFY_API_TOKEN: "test-token", SCRIPT_LIMIT: "2", SYNC_COOLDOWN_MINUTES: "10", SYNC_HOURLY_LIMIT: "3", SYNC_DAILY_LIMIT: "10" },
     mediaCacher: async (_db, reelId) => ({ reelId, stored: true, evictedReelId: null, assetsStored: 2 }),
+    nicheSearcher: async (db, niche) => (await db.query(
+      "INSERT INTO niche_searches(niche, search_term) VALUES ($1,$1) RETURNING *", [niche]
+    )).rows[0],
     apifyImporter: async (_db, selectedCompetitor) => ({
       id: 77,
       competitor_id: selectedCompetitor.id,
@@ -188,6 +228,18 @@ test("REST API reads seeded reels and persists a script", async () => {
     assert.equal(competitors[0].missing_media_count, 1);
     assert.equal(competitors[0].sync_can_start, true);
     assert.equal(competitors[0].sync_hourly_remaining, 3);
+
+    const nicheResponse = await fetch(`${base}/api/niche-searches`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ niche: "магазин обуви" })
+    });
+    assert.equal(nicheResponse.status, 202);
+    const nicheSearch = (await nicheResponse.json()).data;
+    assert.equal(nicheSearch.niche, "магазин обуви");
+    const nicheStatus = await fetch(`${base}/api/niche-searches/${nicheSearch.id}`);
+    assert.equal((await nicheStatus.json()).data.status, "queued");
+    const nicheResults = await fetch(`${base}/api/niche-searches/${nicheSearch.id}/results`);
+    assert.equal((await nicheResults.json()).data.reels.length, 0);
 
     const syncResponse = await fetch(`${base}/api/competitors/${competitors[0].id}/sync`, { method: "POST" });
     const syncRun = (await syncResponse.json()).data;

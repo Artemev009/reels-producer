@@ -44,6 +44,7 @@ memory.public.none(`
     captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
 `);
+memory.public.none(await readFile(new URL("../db/migrations/005_niche_discovery.sql", import.meta.url), "utf8"));
 const adapter = memory.adapters.createPg();
 const db = new adapter.Pool();
 
