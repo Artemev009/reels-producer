@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { newDb } from "pg-mem";
 import { backfillMissingSegments, cacheReelMedia, normalizeApifyReel, recoverInterruptedSyncRuns } from "../src/apify.js";
-import { runNicheSearch } from "../src/niche.js";
+import { buildNicheSearchTerms, runNicheSearch } from "../src/niche.js";
 import { createApp } from "../src/app.js";
 import { createBackupSnapshot, restoreBackupSnapshot, restoreMediaAsset } from "../src/backup.js";
 
@@ -112,6 +112,15 @@ test("Apify output is normalized into the SQL reel model", () => {
   assert.match(short.scriptText, /не найден/i);
 });
 
+test("niche queries expand common categories and preserve explicitly separated topics", () => {
+  assert.deepEqual(buildNicheSearchTerms("сувенирная продукция"), [
+    "сувенирная продукция", "сувениры на заказ", "подарки ручной работы"
+  ]);
+  assert.deepEqual(buildNicheSearchTerms("ремонт квартир, отделка помещений, продажа сувенирной продукции"), [
+    "ремонт квартир", "отделка помещений", "продажа сувенирной продукции"
+  ]);
+});
+
 test("niche discovery imports matching reels and creators without a live Apify run", async () => {
   const memory = newDb({ noAstCoverageCheck: true });
   const schema = await readFile(new URL("../db/migrations/001_schema.sql", import.meta.url), "utf8");
@@ -122,7 +131,13 @@ test("niche discovery imports matching reels and creators without a live Apify r
   const search = await pool.query("INSERT INTO niche_searches(niche, search_term) VALUES ($1,$1) RETURNING id", ["обучение нейросетям"]);
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
-    if (options?.method === "POST") return Response.json({ data: { id: "run-1", status: "SUCCEEDED", defaultDatasetId: "dataset-1" } });
+    if (options?.method === "POST") {
+      const input = JSON.parse(options.body);
+      assert.equal(input.searchType, "popular");
+      assert.equal(input.searchLimit, 3);
+      assert.deepEqual(input.search.split(", "), buildNicheSearchTerms("обучение нейросетям"));
+      return Response.json({ data: { id: "run-1", status: "SUCCEEDED", defaultDatasetId: "dataset-1" } });
+    }
     if (String(url).includes("actor-runs")) return Response.json({ data: { id: "run-1", status: "SUCCEEDED", defaultDatasetId: "dataset-1" } });
     return Response.json([{
       id: "niche-reel-1", shortCode: "niche-reel-1", type: "Video", productType: "clips",
@@ -144,6 +159,31 @@ test("niche discovery imports matching reels and creators without a live Apify r
   assert.equal(imported.rows[0].instagram_handle, "@ai.creator");
   assert.equal(imported.rows[0].relevance_score, 100);
   assert.deepEqual(imported.rows[0].matched_terms, ["обучение", "нейросетям"]);
+});
+
+test("niche discovery explains when Instagram has no popular feed for a topic", async () => {
+  const memory = newDb({ noAstCoverageCheck: true });
+  const schema = await readFile(new URL("../db/migrations/001_schema.sql", import.meta.url), "utf8");
+  memory.public.none(schema);
+  addCurrentReelColumns(memory);
+  memory.public.none(await readFile(new URL("../db/migrations/005_niche_discovery.sql", import.meta.url), "utf8"));
+  const pool = new (memory.adapters.createPg().Pool)();
+  const search = await pool.query("INSERT INTO niche_searches(niche, search_term) VALUES ($1,$1) RETURNING id", ["ремонт квартир"]);
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    if (options?.method === "POST") return Response.json({ data: { id: "run-empty", status: "SUCCEEDED", defaultDatasetId: "dataset-empty" } });
+    if (String(_url).includes("actor-runs")) return Response.json({ data: { id: "run-empty", status: "SUCCEEDED", defaultDatasetId: "dataset-empty" } });
+    return Response.json([{ error: "no_items", searchTerm: "ремонт квартир" }]);
+  };
+  try {
+    await runNicheSearch(pool, search.rows[0].id, { env: { APIFY_API_TOKEN: "fake-token" } });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  const status = await pool.query("SELECT status, error_message FROM niche_searches WHERE id = $1", [search.rows[0].id]);
+  assert.equal(status.rows[0].status, "partial");
+  assert.match(status.rows[0].error_message, /Instagram не нашёл публичные популярные Reels/i);
+  assert.match(status.rows[0].error_message, /ремонт квартир/i);
 });
 
 test("REST API reads seeded reels and persists a script", async () => {

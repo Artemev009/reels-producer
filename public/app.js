@@ -181,7 +181,7 @@ async function renderNiche() {
   const statusCopy = {
     queued: "Поиск в очереди…", running: "Ищем популярные Reels по вашей теме…", importing: "Сохраняем ролики в базу…",
     succeeded: `Готово: найдено ${search?.imported_count || 0} видео от ${authors.size} авторов.`,
-    partial: "Поиск завершён, но подходящих видео не нашлось. Попробуйте более широкую формулировку.",
+    partial: search?.error_message || "Instagram не вернул подходящие публичные Reels по этой теме. Попробуйте назвать услугу, товар или направление другими словами.",
     failed: search?.error_message || "Поиск завершился с ошибкой."
   };
   app.innerHTML = `<section class="page">
@@ -189,7 +189,7 @@ async function renderNiche() {
     <form class="niche-search-form" id="niche-search-form">
       <label for="niche-input">Ваша ниша или тема</label>
       <div class="niche-search-row"><input id="niche-input" name="niche" maxlength="100" placeholder="Например: обучение нейросетям, интернет-магазин обуви" required ${active ? "disabled" : ""}><button class="button primary" type="submit" ${active ? "disabled" : ""}>${active ? "Ищем…" : "Найти Reels"}</button></div>
-      <small>Поиск использует публичные популярные Reels Instagram. Запрос ограничен 10 результатами; до 3 поисков в сутки. Это пробный алгоритмический подбор, не гарантия полного списка топ-авторов.</small>
+      <small>Проверяем исходную тему и близкие формулировки через публичный поиск Instagram. До 9 роликов за поиск и до 3 поисков в сутки. Это пробный подбор, а не гарантия полного списка топ-авторов.</small>
     </form>
     ${search ? `<div class="niche-status ${search.status === "failed" ? "failed" : ""}" role="status">${escapeHtml(statusCopy[search.status] || "Поиск обработан")}</div>` : `<div class="niche-intro"><strong>С чего начнём?</strong><p>Задайте одну нишу — например, «маркетинг для малого бизнеса». Покажем ролики, которые Instagram считает популярными по этой теме. Позже можно будет расширить подбор и оценку авторов.</p></div>`}
     ${reels.length ? `<div class="niche-result-head"><div><h2>Подборка по теме «${escapeHtml(search.niche)}»</h2><p>${reels.length} роликов · ${authors.size} авторов</p></div><button class="button" id="open-niche-competitors">Все авторы</button></div><div class="reel-grid niche-reel-grid">${reels.map((reel) => `<article class="reel-card niche-reel-card"><a class="reel-cover" href="${escapeHtml(reel.source_url)}" target="_blank" rel="noopener noreferrer"><img src="${escapeHtml(reel.thumbnail_url || "/placeholder.svg")}" alt="Превью: ${escapeHtml(reel.title)}" loading="lazy" data-fallback><span class="duration">${duration(reel.duration_seconds)}</span></a><h2 class="reel-title">${escapeHtml(reel.title)}</h2><p class="handle"><a href="https://www.instagram.com/${encodeURIComponent(String(reel.instagram_handle || "").replace(/^@/, ""))}/" target="_blank" rel="noopener noreferrer">${escapeHtml(reel.instagram_handle || "Автор Instagram")}</a></p><p class="metrics"><span>▷ ${compact(reel.views_count)}</span><span>♡ ${compact(reel.likes_count)}</span><span class="match-score">Совпадение ${reel.relevance_score}%</span></p><p class="matched-terms">${reel.matched_terms?.length ? `В тексте: ${escapeHtml(reel.matched_terms.join(", "))}` : "Популярный ролик по теме поиска"}</p><a class="button niche-open-link" href="${escapeHtml(reel.source_url)}" target="_blank" rel="noopener noreferrer">Открыть оригинал ↗</a></article>`).join("")}</div>` : ""}
